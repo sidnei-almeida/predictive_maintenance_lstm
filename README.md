@@ -1,241 +1,172 @@
-# 🔧 Sistema de Manutenção Preditiva com LSTM - App Streamlit
+---
+title: Predictive Maintenance LSTM API
+emoji: 🔧
+colorFrom: teal
+colorTo: indigo
+sdk: docker
+license: mit
+pinned: false
+---
 
-Um aplicativo Streamlit premium e elegante para análise e predição de falhas em máquinas industriais utilizando redes neurais LSTM (Long Short-Term Memory).
+# Predictive Maintenance LSTM API
 
-## 🎯 Características do App
+Production-ready REST API for predictive maintenance, backed by a Long Short-Term Memory (LSTM) neural network.  
+The service is optimized for deployment on [Hugging Face Spaces](https://huggingface.co/spaces) as a Docker Space, and it exposes endpoints that your custom HTML/CSS/JS frontend can consume.
 
-### 🎨 Design Premium
-- **Tema escuro elegante** com paleta de cores técnica (verde-azulado)
-- **Interface responsiva** e moderna
-- **Animações suaves** e transições
-- **Visualizações interativas** com Plotly
-- **Cards de métricas** com gradientes e efeitos visuais
+## Features
 
-### 📊 Funcionalidades Principais
+- 🚀 **Ready for Spaces**: Dockerfile and metadata prepared for instant deployment.  
+- 🤖 **LSTM backend**: Uses the pre-trained `predictive_maintenance_model.keras` model (with graceful fallbacks).  
+- 📈 **Rich metadata**: Access training stats, dataset details, and ready-to-consume health endpoints.  
+- 🧠 **Fallback heuristics**: When TensorFlow is unavailable, the API switches to a simulated heuristic predictor so the Space remains interactive.  
+- 📦 **Self-contained artifacts**: Loads local assets first and automatically falls back to the GitHub versions if needed.
 
-#### 🏠 Página Inicial
-- Visão geral do sistema com métricas principais
-- Cards de status em tempo real
-- Distribuição de falhas com gráficos interativos
-- Informações técnicas do projeto
-
-#### 📈 Análise de Dados
-- Estatísticas descritivas das features
-- Visualizações comparativas (normal vs falha)
-- Matriz de correlação interativa
-- Análise de features por estado
-
-#### 🤖 Informações do Modelo
-- Arquitetura detalhada da rede LSTM
-- Parâmetros de configuração
-- Resumo técnico do modelo
-- Vantagens da arquitetura LSTM
-
-#### 📊 Análise de Treinamento
-- Gráficos de evolução (accuracy/loss)
-- Métricas de convergência
-- Análise de overfitting
-- Insights e recomendações
-
-#### 🔮 Interface de Predições
-- **Predição Aleatória**: Teste com amostras do dataset
-- **Predição Personalizada**: Interface para entrada manual de dados
-- Gráficos de probabilidade com gauges
-- Interpretação automática dos resultados
-
-#### 💡 Insights Avançados
-- **Análise de Performance**: Comparação com benchmarks
-- **Padrões de Falhas**: Identificação de correlações críticas
-- **Otimizações**: Sugestões de melhorias
-- **Recomendações**: Roadmap para produção
-
-## 🚀 Como Executar
-
-### Pré-requisitos
-- Python 3.8+
-- TensorFlow 2.15+
-- Streamlit 1.31+
-
-### Instalação Rápida
-
-1. **Clonar o repositório:**
-```bash
-git clone https://github.com/sidnei-almeida/manutencao_preditiva_lstm.git
-cd manutencao_preditiva_lstm
-```
-
-2. **Instalar dependências:**
-```bash
-pip install -r requirements.txt
-```
-
-3. **Executar o app:**
-```bash
-# Método 1: Script automático
-./run_app.sh
-
-# Método 2: Comando direto
-streamlit run app_manutencao_preditiva.py --server.port 8502
-```
-
-4. **Acessar no navegador:**
-```
-http://localhost:8502
-```
-
-> **Nota**: O app carrega automaticamente os dados e modelo do repositório GitHub, não sendo necessário fazer download manual dos arquivos.
-
-### Estrutura de Arquivos
-
-O app carrega automaticamente os arquivos necessários do repositório GitHub:
+## Project Structure
 
 ```
 manutencao_preditiva_lstm/
-├── app_manutencao_preditiva.py    # App principal
-├── .streamlit/
-│   └── config.toml              # Configuração do Streamlit
-├── requirements.txt              # Dependências
-└── run_app.sh                   # Script de execução
+├── app.py                      # FastAPI application (entry point for Spaces)
+├── Dockerfile                  # Space Docker configuration
+├── requirements.txt            # Python dependencies
+├── dados/                      # Processed dataset (features/labels)
+├── modelos/                    # Pre-trained Keras model
+├── notebooks/                  # Data exploration and training notebooks
+├── treinamento/                # Training summary and metrics
+└── ...
 ```
 
-**Arquivos carregados automaticamente do GitHub:**
-- `dados/X_processed.npy` - Features processadas
-- `dados/y_processed.npy` - Targets processados  
-- `modelos/predictive_maintenance_model.keras` - Modelo treinado
-- `treinamento/training_summary.json` - Histórico de treinamento
+## API Overview
 
-## 🛠️ Tecnologias Utilizadas
+| Method | Endpoint    | Description                                  |
+|--------|-------------|----------------------------------------------|
+| GET    | `/`         | Basic welcome payload with helpful links     |
+| GET    | `/health`   | Component status (model/data/training)       |
+| GET    | `/metadata` | Dataset, training, and model descriptors     |
+| GET    | `/sample`   | Serves a random dataset sample + prediction  |
+| POST   | `/predict`  | Run inference using manual or sequence data  |
 
-### Backend
-- **Python 3.8+** - Linguagem principal
-- **TensorFlow 2.15+** - Framework de Deep Learning
-- **NumPy** - Computação numérica
-- **Pandas** - Manipulação de dados
-- **Scikit-learn** - Pré-processamento e métricas
+### Prediction Payloads
 
-### Frontend
-- **Streamlit** - Framework web para Python
-- **Plotly** - Visualizações interativas
-- **CSS3** - Estilização customizada
-- **HTML5** - Estrutura da interface
+You can either send a single reading (the API broadcasts it to a 50-step sequence) or a full preprocessed sequence.
 
-### Machine Learning
-- **LSTM (Long Short-Term Memory)** - Arquitetura de rede neural
-- **Binary Classification** - Classificação binária
-- **Time Series Analysis** - Análise de séries temporais
-- **Predictive Maintenance** - Manutenção preditiva
+#### Single Reading
 
-## 🎨 Características Visuais
-
-### Paleta de Cores
-- **Primária**: `#00D4AA` (Verde-azulado técnico)
-- **Secundária**: `#00B4D8` (Azul claro)
-- **Accent**: `#0077B6` (Azul escuro)
-- **Sucesso**: `#00D4AA` (Verde)
-- **Aviso**: `#FFB347` (Laranja)
-- **Erro**: `#FF6B6B` (Vermelho)
-
-### Componentes Visuais
-- **Cards de métricas** com gradientes e animações
-- **Gráficos interativos** com Plotly
-- **Indicadores de status** em tempo real
-- **Formulários elegantes** para entrada de dados
-- **Navegação lateral** com menu premium
-
-## 📱 Responsividade
-
-O app é totalmente responsivo e funciona perfeitamente em:
-- 💻 **Desktop** (1920x1080+)
-- 📱 **Tablet** (768x1024)
-- 📱 **Mobile** (375x667+)
-
-## 🔧 Personalização
-
-### Modificar Cores
-Edite as variáveis CSS no arquivo `app_manutencao_preditiva.py`:
-
-```css
-:root {
-    --primary-color: #00D4AA;
-    --secondary-color: #00B4D8;
-    --accent-color: #0077B6;
-    /* ... outras cores */
+```json
+{
+  "reading": {
+    "air_temperature_k": 298.0,
+    "process_temperature_k": 310.0,
+    "rotational_speed_rpm": 1500.0,
+    "torque_nm": 45.0,
+    "tool_wear_min": 120.0,
+    "product_type": "L"
+  }
 }
 ```
 
-### Adicionar Novas Funcionalidades
-1. Crie uma nova função seguindo o padrão `show_nova_funcionalidade()`
-2. Adicione ao menu de navegação
-3. Implemente a lógica na função `main()`
+#### Preprocessed Sequence
 
-## 📊 Dados Suportados
+```json
+{
+  "sequence": [
+    [0.12, 0.32, -0.48, 0.21, 0.45, 0.0, 1.0],
+    [0.10, 0.30, -0.50, 0.22, 0.46, 0.0, 1.0]
+  ]
+}
+```
 
-O app espera dados no seguinte formato:
-- **Features**: 7 colunas (temperatura, velocidade, torque, etc.)
-- **Target**: Binário (0=Normal, 1=Falha)
-- **Sequências**: 50 timesteps para LSTM
+If the sequence contains fewer than 50 timesteps, the API pads it using the last frame; if it is longer, the most recent 50 timesteps are used.
 
-## 🎯 Métricas Exibidas
+### Response Example
 
-### Performance do Modelo
-- **Acurácia**: 95.2% - Performance geral do modelo
-- **Perda**: 0.162 - Função de custo durante treinamento
-- **Precisão**: Estimativa baseada na acurácia
-- **Recall**: Estimativa baseada na acurácia
-- **Correlações**: Relação entre features e falhas
+```json
+{
+  "probability": 0.7421,
+  "predicted_label": 1,
+  "threshold": 0.5,
+  "details": {
+    "sequence_steps": 50,
+    "features_order": [
+      "air_temperature_k",
+      "process_temperature_k",
+      "rotational_speed_rpm",
+      "torque_nm",
+      "tool_wear_min",
+      "type_l",
+      "type_m"
+    ],
+    "uses_simulated_model": false,
+    "reading": {
+      "air_temperature_k": 298.0,
+      "process_temperature_k": 310.0,
+      "rotational_speed_rpm": 1500.0,
+      "torque_nm": 45.0,
+      "tool_wear_min": 120.0,
+      "product_type": "L"
+    }
+  }
+}
+```
 
-### Dataset
-- **Total de Amostras**: 10.000 registros
-- **Features**: 7 sensores (temperatura, velocidade, torque, etc.)
-- **Classes**: 2 (Normal/Falha)
-- **Distribuição**: ~96% Normal, ~4% Falha
-- **Sequência Temporal**: 50 timesteps para LSTM
+## Running Locally
 
-## 🚀 Próximos Passos
+```bash
+git clone https://github.com/sidnei-almeida/manutencao_preditiva_lstm.git
+cd manutencao_preditiva_lstm
+python -m venv .venv && source .venv/bin/activate
+pip install --no-cache-dir -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 7860 --reload
+```
 
-### Melhorias Planejadas
-- [ ] Integração com APIs de sensores em tempo real
-- [ ] Sistema de alertas por email/SMS
-- [ ] Exportação de relatórios em PDF
-- [ ] Dashboard de monitoramento contínuo
-- [ ] Sistema de versionamento de modelos
+The interactive docs will be available at `http://localhost:7860/docs`.
 
-### Deploy em Produção
-- [ ] Containerização com Docker
-- [ ] Deploy em cloud (AWS/Azure/GCP)
-- [ ] CI/CD pipeline
-- [ ] Monitoramento de performance
-- [ ] Backup automático de modelos
+## Deploying to Hugging Face Spaces
 
-## 🤝 Contribuição
+1. Create a **Docker Space**.  
+2. Push this repository to the Space (or connect it as a Git submodule).  
+3. Spaces automatically detects the `Dockerfile`, installs dependencies, and launches `uvicorn app:app` on port 7860.
 
-Para contribuir com o projeto:
-1. Fork o repositório
-2. Crie uma branch para sua feature
-3. Implemente as melhorias
-4. Teste thoroughly
-5. Submeta um Pull Request
+### Large File Storage (LFS)
 
-## 📄 Licença
+Model and dataset artifacts are tracked with Git LFS via the `.gitattributes` file.  
+Before committing locally, ensure LFS is installed and pull the tracked binaries:
 
-Este projeto está sob licença MIT. Veja o arquivo LICENSE para mais detalhes.
+```bash
+git lfs install
+git lfs pull
+```
 
-## 👨‍💻 Autor
+When pushing to the Space, Hugging Face will store these large files efficiently ([Spaces guide](https://huggingface.co/spaces/salmeida/predictive-maintenance-lstm/)).
 
-**Sidnei Almeida**
-- GitHub: [@sidnei-almeida](https://github.com/sidnei-almeida)
-- LinkedIn: [Sidnei Almeida](https://www.linkedin.com/in/saaelmeida93/)
+### Environment Notes
 
----
+- The image defaults to CPU execution (`tensorflow-cpu`); GPU layers are disabled in code.  
+- If TensorFlow cannot load, a heuristic model keeps the API responsive (flagged in responses via `uses_simulated_model`).  
+- `packages.txt` provides runtime libraries required by TensorFlow (GL, OpenMP).
 
-## 🎉 Conclusão
+## Frontend Integration
 
-Este app Streamlit representa uma solução completa e elegante para manutenção preditiva industrial, combinando:
+You can build any UI stack (HTML/CSS/JS, React, etc.) and call the API from the same Space or from an external frontend. Suggested flow:
 
-- **Design premium** com UX/UI moderna
-- **Funcionalidades avançadas** de análise e predição
-- **Visualizações interativas** e informativas
-- **Interface intuitiva** para usuários técnicos e não-técnicos
-- **Arquitetura escalável** para futuras melhorias
+1. Fetch `/metadata` once to display project information.  
+2. Use `/health` for heartbeat monitoring.  
+3. Invoke `/predict` with the user inputs (form fields, sliders, etc.).  
+4. Optionally show `/sample` responses for demo or QA purposes.
 
-O sistema está pronto para uso em ambientes industriais reais, oferecendo uma base sólida para implementação de manutenção preditiva inteligente.
+## Model Artifacts
+
+- `modelos/predictive_maintenance_model.keras`: Pre-trained binary classifier (LSTM).  
+- `treinamento/training_summary.json`: document with accuracy, loss, dataset splits, and hyperparameters.  
+- `dados/X_processed.npy`, `dados/y_processed.npy`: Processed features/labels aligned with the model input shape.
+
+## Development Roadmap
+
+- Add streaming predictions for near-real-time sensors.  
+- Provide calibration and explainability endpoints (feature attributions, SHAP summaries).  
+- Ship an end-to-end demo Space with the planned custom frontend.  
+- Automate re-training using the notebooks and CI/CD triggers.
+
+## License
+
+Released under the [MIT License](LICENSE).  
+Created by [Sidnei Almeida](https://github.com/sidnei-almeida). Pull requests and community contributions are welcome!

@@ -1,2268 +1,386 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from streamlit_option_menu import option_menu
-import warnings
 import json
+import logging
 import os
-import requests
-from io import BytesIO
-from pathlib import Path
 import tempfile
+from io import BytesIO
+from typing import List, Optional, Literal
 
-# Suprimir warnings
-warnings.filterwarnings('ignore')
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import numpy as np
+import requests
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, root_validator
 
-# Configurações específicas para tensorflow-cpu no Streamlit Cloud
-os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Forçar uso apenas de CPU
-os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
 
-# Importar TensorFlow de forma segura e otimizada
+logger = logging.getLogger("predictive-maintenance-api")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 try:
     import tensorflow as tf
-    # Configurar TensorFlow para usar apenas CPU
-    tf.config.set_visible_devices([], 'GPU')
-    tf.get_logger().setLevel('ERROR')
-    
-    # Configurações de threading para evitar problemas no Streamlit Cloud
+
+    tf.config.set_visible_devices([], "GPU")
+    tf.get_logger().setLevel("ERROR")
     tf.config.threading.set_inter_op_parallelism_threads(1)
     tf.config.threading.set_intra_op_parallelism_threads(1)
-    
     TF_AVAILABLE = True
-except ImportError:
+except Exception as exc:  # pragma: no cover - best effort fallback
     TF_AVAILABLE = False
-    st.warning("TensorFlow não está disponível. Usando modelo simulado.")
-except Exception as e:
-    TF_AVAILABLE = False
-    st.warning(f"Aviso na importação do TensorFlow: {e}. Usando modelo simulado.")
+    logger.warning("TensorFlow unavailable: %s. Falling back to simulated model.", exc)
 
-# Configuração da página
-st.set_page_config(
-    page_title="Sistema de Manutenção Preditiva com LSTM",
-    page_icon="🔧",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+FEATURE_NAMES = [
+    "air_temperature_k",
+    "process_temperature_k",
+    "rotational_speed_rpm",
+    "torque_nm",
+    "tool_wear_min",
+    "type_l",
+    "type_m",
+]
+SEQUENCE_LENGTH = 50
+REMOTE_BASE_URL = "https://raw.githubusercontent.com/sidnei-almeida/manutencao_preditiva_lstm/main"
 
-# Configurações de threading para evitar problemas no Streamlit Cloud
-import threading
-threading.stack_size(65536)
 
-# CSS personalizado para tema escuro elegante com cores técnicas
-st.markdown("""
-<style>
-    /* Importar fontes elegantes */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
-    /* Variáveis de cores premium - PALETA TÉCNICA */
-    :root {
-        --primary-color: #00D4AA;
-        --secondary-color: #00B4D8;
-        --accent-color: #0077B6;
-        --success-color: #00D4AA;
-        --warning-color: #FFB347;
-        --error-color: #FF6B6B;
-        --dark-bg: #0E1117;
-        --card-bg: #1E1E1E;
-        --text-primary: #FAFAFA;
-        --text-secondary: #B0B0B0;
-        --gradient-primary: linear-gradient(135deg, #00D4AA 0%, #00B4D8 100%);
-        --gradient-secondary: linear-gradient(135deg, #0077B6 0%, #00D4AA 100%);
-        --gradient-dark: linear-gradient(135deg, #1E1E1E 0%, #2D2D2D 100%);
-        --shadow-soft: 0 8px 32px rgba(0, 212, 170, 0.3);
-        --shadow-hover: 0 12px 40px rgba(0, 212, 170, 0.4);
-    }
-    
-    /* Estilo global */
-    .stApp {
-        background: var(--dark-bg);
-        color: var(--text-primary);
-    }
-    
-    /* Ajustar o container principal para usar toda a largura */
-    .main .block-container {
-        max-width: none !important;
-        padding-left: 1rem !important;
-        padding-right: 1rem !important;
-    }
-    
-    /* Header principal */
-    .main-header {
-        font-family: 'Inter', sans-serif;
-        font-size: 2.5rem;
-        font-weight: 700;
-        background: var(--gradient-primary);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        text-align: center;
-        margin-bottom: 1.5rem;
-        text-shadow: 0 4px 8px rgba(0, 212, 170, 0.3);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 0.5rem;
-    }
-    
-    /* Cards de métricas premium */
-    .metric-card {
-        background: var(--gradient-dark);
-        padding: 1rem;
-        border-radius: 12px;
-        color: var(--text-primary);
-        text-align: center;
-        margin: 0.3rem 0;
-        border: 1px solid rgba(0, 212, 170, 0.2);
-        box-shadow: var(--shadow-soft);
-        transition: all 0.3s ease;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .metric-card::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 3px;
-        background: var(--gradient-primary);
-    }
-    
-    .metric-card:hover {
-        transform: translateY(-4px);
-        box-shadow: var(--shadow-hover);
-        border-color: var(--primary-color);
-    }
-    
-    /* Cards de informação */
-    .info-box {
-        background: var(--card-bg);
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 4px solid var(--primary-color);
-        margin: 1rem 0;
-        box-shadow: var(--shadow-soft);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    
-    .success-box {
-        background: linear-gradient(135deg, rgba(0, 212, 170, 0.1) 0%, rgba(0, 180, 216, 0.1) 100%);
-        padding: 1.5rem;
-        border-radius: 12px;
-        border-left: 4px solid var(--primary-color);
-        margin: 1rem 0;
-        box-shadow: var(--shadow-soft);
-        border: 1px solid rgba(0, 212, 170, 0.3);
-    }
-    
-    .warning-box {
-        background: linear-gradient(135deg, rgba(255, 179, 71, 0.1) 0%, rgba(255, 107, 107, 0.1) 100%);
-        padding: 1.5rem;
-        border-radius: 12px;
-        border-left: 4px solid var(--warning-color);
-        margin: 1rem 0;
-        box-shadow: var(--shadow-soft);
-        border: 1px solid rgba(255, 179, 71, 0.3);
-    }
-    
-    /* Botões premium */
-    .stButton > button {
-        background: var(--gradient-primary);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.5rem 1.5rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-        box-shadow: var(--shadow-soft);
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: var(--shadow-hover);
-    }
-    
-    /* Sidebar elegante */
-    .css-1d391kg {
-        background: var(--card-bg);
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    
-    /* Títulos elegantes */
-    h1, h2, h3, h4, h5, h6 {
-        color: var(--text-primary);
-        font-family: 'Inter', sans-serif;
-        font-weight: 600;
-    }
-    
-    /* Texto secundário */
-    .text-secondary {
-        color: var(--text-secondary);
-    }
-    
-    /* Cards de dados */
-    .data-card {
-        background: var(--card-bg);
-        padding: 1.5rem;
-        border-radius: 12px;
-        margin: 1rem 0;
-        box-shadow: var(--shadow-soft);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    
-    /* Animações suaves */
-    .fade-in {
-        animation: fadeIn 0.6s ease-in;
-    }
-    
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(20px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    
-    /* Scrollbar personalizada */
-    ::-webkit-scrollbar {
-        width: 8px;
-    }
-    
-    ::-webkit-scrollbar-track {
-        background: var(--dark-bg);
-    }
-    
-    ::-webkit-scrollbar-thumb {
-        background: var(--primary-color);
-        border-radius: 4px;
-    }
-    
-    ::-webkit-scrollbar-thumb:hover {
-        background: var(--secondary-color);
-    }
-</style>
-""", unsafe_allow_html=True)
+class ManualReading(BaseModel):
+    air_temperature_k: float = Field(..., ge=250, le=400, description="Ambient temperature in Kelvin.")
+    process_temperature_k: float = Field(..., ge=250, le=420, description="Process temperature in Kelvin.")
+    rotational_speed_rpm: float = Field(..., ge=0, le=4000, description="Rotational speed in RPM.")
+    torque_nm: float = Field(..., ge=0, le=200, description="Torque in Newton-meters.")
+    tool_wear_min: float = Field(..., ge=0, le=500, description="Tool wear in minutes.")
+    product_type: Literal["H", "L", "M"] = Field("M", description="Product type: H (baseline), L, or M.")
 
-@st.cache_data
-def load_training_data():
-    """Carrega os dados de treinamento do GitHub ou local"""
-    try:
-        # Primeiro, tentar carregar do arquivo local
-        local_path = "treinamento/training_summary.json"
-        if os.path.exists(local_path):
-            with open(local_path, 'r') as f:
-                return json.load(f)
-        
-        # Se não existir local, tentar do GitHub
-        training_url = "https://raw.githubusercontent.com/sidnei-almeida/manutencao_preditiva_lstm/main/treinamento/training_summary.json"
-        
-        response = requests.get(training_url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        if response.status_code == 200:
-            training_data = response.json()
-            return training_data
-        else:
-            st.warning(f"Erro {response.status_code} ao baixar dados de treinamento do GitHub. Usando dados de demonstração.")
-            # Retornar dados de demonstração se falhar
-            return {
-                "final_evaluation": {"test_accuracy": 0.9518, "test_loss": 0.1234},
-                "training_parameters": {"epochs": 50, "batch_size": 64, "sequence_length": 50},
-                "dataset_info": {"training_samples": 8000, "testing_samples": 2000, "features_per_timestep": 7},
-                "training_history": {
-                    "accuracy": [0.8] * 50,
-                    "val_accuracy": [0.85] * 50,
-                    "loss": [0.5] * 50,
-                    "val_loss": [0.4] * 50
-                }
-            }
-            
-    except Exception as e:
-        st.warning(f"Erro ao carregar dados de treinamento: {e}. Usando dados de demonstração.")
-        # Retornar dados de demonstração se falhar
-        return {
-            "final_evaluation": {"test_accuracy": 0.9518, "test_loss": 0.1234},
-            "training_parameters": {"epochs": 50, "batch_size": 64, "sequence_length": 50},
-            "dataset_info": {"training_samples": 8000, "testing_samples": 2000, "features_per_timestep": 7},
-            "training_history": {
-                "accuracy": [0.8] * 50,
-                "val_accuracy": [0.85] * 50,
-                "loss": [0.5] * 50,
-                "val_loss": [0.4] * 50
-            }
-        }
 
-@st.cache_data
-def load_processed_data():
-    """Carrega os dados processados do GitHub ou local"""
-    try:
-        # Primeiro, tentar carregar dos arquivos locais
-        X_local_path = "dados/X_processed.npy"
-        y_local_path = "dados/y_processed.npy"
-        
-        if os.path.exists(X_local_path) and os.path.exists(y_local_path):
-            X = np.load(X_local_path, allow_pickle=True)
-            y = np.load(y_local_path, allow_pickle=True)
-            
-            # Converter para float32 para compatibilidade com o modelo
-            X = X.astype('float32')
-            y = y.astype('float32')
-            
-            return X, y
-        
-        # Se não existir local, tentar do GitHub
-        X_url = "https://raw.githubusercontent.com/sidnei-almeida/manutencao_preditiva_lstm/main/dados/X_processed.npy"
-        y_url = "https://raw.githubusercontent.com/sidnei-almeida/manutencao_preditiva_lstm/main/dados/y_processed.npy"
-        
-        X_response = requests.get(X_url, timeout=60, headers={'User-Agent': 'Mozilla/5.0'})
-        y_response = requests.get(y_url, timeout=60, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        if X_response.status_code == 200 and y_response.status_code == 200:
-            # Salvar temporariamente e carregar
-            X_temp = BytesIO(X_response.content)
-            y_temp = BytesIO(y_response.content)
-            
-            X = np.load(X_temp, allow_pickle=True)
-            y = np.load(y_temp, allow_pickle=True)
-            
-            # Converter para float32 para compatibilidade com o modelo
-            X = X.astype('float32')
-            y = y.astype('float32')
-            
-            return X, y
-        else:
-            st.warning(f"Erro ao baixar arquivos do GitHub (X: {X_response.status_code}, y: {y_response.status_code}). Gerando dados de demonstração.")
-            # Gerar dados de demonstração realistas
-            np.random.seed(42)
-            
-            # Gerar dados realistas para sensores industriais
-            n_samples = 10000
-            
-            # Air Temperature [K] - entre 280-350K
-            air_temp = np.random.normal(300, 15, n_samples)
-            air_temp = np.clip(air_temp, 280, 350)
-            
-            # Process Temperature [K] - ligeiramente maior que air temp
-            process_temp = air_temp + np.random.normal(10, 5, n_samples)
-            process_temp = np.clip(process_temp, 280, 350)
-            
-            # Rotational Speed [rpm] - entre 1000-3000
-            rotational_speed = np.random.normal(2000, 300, n_samples)
-            rotational_speed = np.clip(rotational_speed, 1000, 3000)
-            
-            # Torque [Nm] - entre 0-100
-            torque = np.random.normal(40, 15, n_samples)
-            torque = np.clip(torque, 0, 100)
-            
-            # Tool Wear [min] - entre 0-300
-            tool_wear = np.random.normal(150, 50, n_samples)
-            tool_wear = np.clip(tool_wear, 0, 300)
-            
-            # Type_L e Type_M (dummy variables)
-            type_l = np.random.choice([0, 1], n_samples, p=[0.7, 0.3])
-            type_m = np.random.choice([0, 1], n_samples, p=[0.6, 0.4])
-            
-            # Combinar features
-            X = np.column_stack([
-                air_temp, process_temp, rotational_speed, torque, tool_wear, type_l, type_m
-            ]).astype('float32')
-            
-            # Normalizar os dados (exceto as dummy variables)
-            from sklearn.preprocessing import StandardScaler
-            scaler = StandardScaler()
-            X[:, :5] = scaler.fit_transform(X[:, :5])  # Normalizar apenas as primeiras 5 features
-            
-            # Gerar targets realistas baseados em padrões
-            # Falhas mais prováveis com temperaturas altas, torque alto, tool wear alto
-            failure_prob = (
-                0.1 * (X[:, 0] > 1.5) +  # Air temp alta
-                0.1 * (X[:, 1] > 1.5) +  # Process temp alta  
-                0.2 * (X[:, 3] > 1.5) +  # Torque alto
-                0.3 * (X[:, 4] > 1.5) +  # Tool wear alto
-                0.1 * np.random.random(n_samples)  # Ruído aleatório
-            )
-            
-            y = (failure_prob > 0.3).astype('float32')
-            
-            return X, y
-            
-    except Exception as e:
-        st.warning(f"Erro ao carregar dados processados: {e}. Gerando dados de demonstração.")
-        # Gerar dados de demonstração realistas
-        np.random.seed(42)
-        
-        # Gerar dados realistas para sensores industriais
-        n_samples = 10000
-        
-        # Air Temperature [K] - entre 280-350K
-        air_temp = np.random.normal(300, 15, n_samples)
-        air_temp = np.clip(air_temp, 280, 350)
-        
-        # Process Temperature [K] - ligeiramente maior que air temp
-        process_temp = air_temp + np.random.normal(10, 5, n_samples)
-        process_temp = np.clip(process_temp, 280, 350)
-        
-        # Rotational Speed [rpm] - entre 1000-3000
-        rotational_speed = np.random.normal(2000, 300, n_samples)
-        rotational_speed = np.clip(rotational_speed, 1000, 3000)
-        
-        # Torque [Nm] - entre 0-100
-        torque = np.random.normal(40, 15, n_samples)
-        torque = np.clip(torque, 0, 100)
-        
-        # Tool Wear [min] - entre 0-300
-        tool_wear = np.random.normal(150, 50, n_samples)
-        tool_wear = np.clip(tool_wear, 0, 300)
-        
-        # Type_L e Type_M (dummy variables)
-        type_l = np.random.choice([0, 1], n_samples, p=[0.7, 0.3])
-        type_m = np.random.choice([0, 1], n_samples, p=[0.6, 0.4])
-        
-        # Combinar features
-        X = np.column_stack([
-            air_temp, process_temp, rotational_speed, torque, tool_wear, type_l, type_m
-        ]).astype('float32')
-        
-        # Normalizar os dados (exceto as dummy variables)
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-        X[:, :5] = scaler.fit_transform(X[:, :5])  # Normalizar apenas as primeiras 5 features
-        
-        # Gerar targets realistas baseados em padrões
-        # Falhas mais prováveis com temperaturas altas, torque alto, tool wear alto
-        failure_prob = (
-            0.1 * (X[:, 0] > 1.5) +  # Air temp alta
-            0.1 * (X[:, 1] > 1.5) +  # Process temp alta  
-            0.2 * (X[:, 3] > 1.5) +  # Torque alto
-            0.3 * (X[:, 4] > 1.5) +  # Tool wear alto
-            0.1 * np.random.random(n_samples)  # Ruído aleatório
+class PredictionRequest(BaseModel):
+    reading: Optional[ManualReading] = Field(
+        None, description="Single timestamp sensor reading. The API will broadcast it to a 50-step sequence."
+    )
+    sequence: Optional[List[List[float]]] = Field(
+        None,
+        description="Preprocessed sequence with shape [timesteps, 7]. Timesteps shorter than 50 will be padded using the last row.",
+    )
+
+    @root_validator
+    def ensure_payload(cls, values: dict) -> dict:
+        if not values.get("reading") and not values.get("sequence"):
+            raise ValueError("Provide either `reading` or `sequence`.")
+        return values
+
+
+class PredictionResponse(BaseModel):
+    probability: float
+    predicted_label: int
+    threshold: float = 0.5
+    details: dict
+
+
+class StatusResponse(BaseModel):
+    model_loaded: bool
+    data_loaded: bool
+    training_loaded: bool
+    tensorflow_available: bool
+
+
+class MetadataResponse(BaseModel):
+    project: str
+    description: str
+    version: str
+    features: List[str]
+    sequence_length: int
+    dataset: dict
+    training: dict
+
+
+class SimulatedModel:
+    """Simple heuristic model for environments without TensorFlow."""
+
+    @staticmethod
+    def predict(batch: np.ndarray) -> np.ndarray:
+        if batch.ndim != 3 or batch.shape[2] != len(FEATURE_NAMES):
+            raise ValueError("Expected input shape (batch, timestep, features=7).")
+
+        last_frame = batch[:, -1, :]
+        risk_score = (
+            np.clip(last_frame[:, 0] - 1.5, 0, None) * 0.20
+            + np.clip(last_frame[:, 1] - 1.5, 0, None) * 0.20
+            + np.clip(last_frame[:, 3] - 1.5, 0, None) * 0.15
+            + np.clip(last_frame[:, 4] - 1.5, 0, None) * 0.35
+            + np.random.random(len(last_frame)) * 0.10
         )
-        
-        y = (failure_prob > 0.3).astype('float32')
-        
-        return X, y
+        probability = 1.0 / (1.0 + np.exp(-risk_score * 2.0))
+        return probability.reshape(-1, 1).astype("float32")
 
-@st.cache_resource
-def load_model():
-    """Carrega o modelo LSTM treinado do GitHub ou cria um modelo simples"""
-    if not TF_AVAILABLE:
-        st.warning("TensorFlow não disponível. Usando modelo simulado.")
-        return "modelo_simulado"
-    
+
+def load_training_data() -> dict:
+    local_path = "treinamento/training_summary.json"
     try:
-        # Primeiro, tentar carregar do arquivo local
-        local_model_path = "modelos/predictive_maintenance_model.keras"
-        if os.path.exists(local_model_path):
-            # Configurar TensorFlow para carregamento seguro com CPU
-            with tf.device('/CPU:0'):
-                model = tf.keras.models.load_model(local_model_path, compile=False)
-                # Compilar o modelo após carregar
-                model.compile(
-                    optimizer='adam',
-                    loss='binary_crossentropy',
-                    metrics=['accuracy']
-                )
-                return model
-        
-        # Se não existir local, tentar do GitHub
-        model_url = "https://raw.githubusercontent.com/sidnei-almeida/manutencao_preditiva_lstm/main/modelos/predictive_maintenance_model.keras"
-        
-        response = requests.get(model_url, timeout=60, headers={'User-Agent': 'Mozilla/5.0'})
-        
+        if os.path.exists(local_path):
+            with open(local_path, "r", encoding="utf-8") as local_file:
+                return json.load(local_file)
+
+        training_url = f"{REMOTE_BASE_URL}/treinamento/training_summary.json"
+        response = requests.get(training_url, timeout=30, headers={"User-Agent": "predictive-maintenance-api/1.0"})
         if response.status_code == 200:
-            # Salvar temporariamente em arquivo e carregar
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.keras') as temp_file:
-                temp_file.write(response.content)
-                temp_file_path = temp_file.name
-            
-            # Carregar o modelo do arquivo temporário com configuração CPU
-            with tf.device('/CPU:0'):
-                model = tf.keras.models.load_model(temp_file_path, compile=False)
-                # Compilar o modelo após carregar
-                model.compile(
-                    optimizer='adam',
-                    loss='binary_crossentropy',
-                    metrics=['accuracy']
-                )
-            
-            # Remover arquivo temporário
-            os.unlink(temp_file_path)
-            
+            return response.json()
+
+        logger.warning("Unable to download training summary (status %s). Returning demo metadata.", response.status_code)
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        logger.warning("Training summary loading error: %s. Returning demo metadata.", exc)
+
+    return {
+        "model_architecture": "Demo LSTM",
+        "training_parameters": {"epochs": 50, "batch_size": 64, "sequence_length": SEQUENCE_LENGTH},
+        "dataset_info": {"training_samples": 8000, "testing_samples": 2000, "features_per_timestep": len(FEATURE_NAMES)},
+        "final_evaluation": {"test_accuracy": 0.9518, "test_loss": 0.1234},
+    }
+
+
+def load_processed_data() -> tuple[np.ndarray, np.ndarray]:
+    X_local_path = "dados/X_processed.npy"
+    y_local_path = "dados/y_processed.npy"
+
+    try:
+        if os.path.exists(X_local_path) and os.path.exists(y_local_path):
+            X = np.load(X_local_path, allow_pickle=True).astype("float32")
+            y = np.load(y_local_path, allow_pickle=True).astype("float32")
+            return X, y
+
+        X_url = f"{REMOTE_BASE_URL}/dados/X_processed.npy"
+        y_url = f"{REMOTE_BASE_URL}/dados/y_processed.npy"
+        X_response = requests.get(X_url, timeout=60, headers={"User-Agent": "predictive-maintenance-api/1.0"})
+        y_response = requests.get(y_url, timeout=60, headers={"User-Agent": "predictive-maintenance-api/1.0"})
+
+        if X_response.status_code == 200 and y_response.status_code == 200:
+            X = np.load(BytesIO(X_response.content), allow_pickle=True).astype("float32")
+            y = np.load(BytesIO(y_response.content), allow_pickle=True).astype("float32")
+            return X, y
+
+        logger.warning(
+            "Could not download processed data (X status %s, y status %s). Generating synthetic dataset.",
+            X_response.status_code,
+            y_response.status_code,
+        )
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        logger.warning("Processed data loading error: %s. Generating synthetic dataset.", exc)
+
+    from sklearn.preprocessing import StandardScaler
+
+    rng = np.random.default_rng(seed=42)
+    samples = 10_000
+
+    air_temperature = np.clip(rng.normal(300, 15, samples), 280, 350)
+    process_temperature = np.clip(air_temperature + rng.normal(10, 5, samples), 285, 360)
+    rotational_speed = np.clip(rng.normal(2000, 300, samples), 1000, 3000)
+    torque = np.clip(rng.normal(40, 15, samples), 0, 120)
+    tool_wear = np.clip(rng.normal(150, 50, samples), 0, 350)
+    type_l = rng.choice([0, 1], samples, p=[0.7, 0.3])
+    type_m = rng.choice([0, 1], samples, p=[0.6, 0.4])
+
+    X = np.column_stack([air_temperature, process_temperature, rotational_speed, torque, tool_wear, type_l, type_m]).astype(
+        "float32"
+    )
+    scaler = StandardScaler()
+    X[:, :5] = scaler.fit_transform(X[:, :5])
+
+    failure_risk = (
+        (X[:, 0] > 1.5).astype("float32") * 0.15
+        + (X[:, 1] > 1.5).astype("float32") * 0.20
+        + (X[:, 3] > 1.5).astype("float32") * 0.25
+        + (X[:, 4] > 1.5).astype("float32") * 0.30
+        + rng.random(samples) * 0.10
+    )
+    y = (failure_risk > 0.35).astype("float32")
+    return X, y
+
+
+def load_model():
+    if not TF_AVAILABLE:
+        logger.warning("TensorFlow not available. Using simulated model.")
+        return SimulatedModel()
+
+    local_model_path = "modelos/predictive_maintenance_model.keras"
+    try:
+        if os.path.exists(local_model_path):
+            with tf.device("/CPU:0"):
+                model = tf.keras.models.load_model(local_model_path, compile=False)
+                model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+                return model
+
+        model_url = f"{REMOTE_BASE_URL}/modelos/predictive_maintenance_model.keras"
+        response = requests.get(model_url, timeout=60, headers={"User-Agent": "predictive-maintenance-api/1.0"})
+        if response.status_code == 200:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".keras") as tmp:
+                tmp.write(response.content)
+                tmp_path = tmp.name
+
+            with tf.device("/CPU:0"):
+                model = tf.keras.models.load_model(tmp_path, compile=False)
+                model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+            os.unlink(tmp_path)
             return model
-        else:
-            st.warning(f"Erro {response.status_code} ao baixar modelo do GitHub. Criando modelo de demonstração.")
-            return create_demo_model()
-            
-    except Exception as e:
-        st.warning(f"Erro ao carregar modelo: {e}. Criando modelo de demonstração.")
-        return create_demo_model()
+
+        logger.warning("Unable to fetch remote model (status %s). Using demo model.", response.status_code)
+    except Exception as exc:  # pragma: no cover - best effort fallback
+        logger.warning("Model loading error: %s. Using demo model.", exc)
+
+    return create_demo_model()
+
 
 def create_demo_model():
-    """Cria um modelo LSTM simples para demonstração"""
     if not TF_AVAILABLE:
-        st.warning("TensorFlow não disponível. Usando modelo simulado.")
-        return "modelo_simulado"
-    
-    try:
-        # Criar modelo com configuração CPU
-        with tf.device('/CPU:0'):
-            model = tf.keras.Sequential([
-                tf.keras.layers.LSTM(64, input_shape=(50, 7)),
+        return SimulatedModel()
+
+    with tf.device("/CPU:0"):
+        model = tf.keras.Sequential(
+            [
+                tf.keras.layers.LSTM(64, input_shape=(SEQUENCE_LENGTH, len(FEATURE_NAMES))),
                 tf.keras.layers.Dropout(0.2),
-                tf.keras.layers.Dense(1, activation='sigmoid')
-            ])
-            
-            model.compile(
-                optimizer='adam',
-                loss='binary_crossentropy',
-                metrics=['accuracy']
-            )
-        
-        return model
-    except Exception as e:
-        st.warning(f"Erro ao criar modelo de demonstração: {e}. Usando modelo simulado.")
-        return "modelo_simulado"
-
-def show_system_status(model, training_data, X, y):
-    """Mostra o status dos componentes do sistema"""
-    
-    # Status do Modelo
-    model_status = "✅ Carregado" if model is not None else "❌ Erro"
-    model_color = "#00D4AA" if model is not None else "#FF6B6B"
-    
-    st.markdown(f"""
-    <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid {model_color};">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="color: #FAFAFA; font-weight: 600;">🤖 Modelo LSTM</span>
-            <span style="color: {model_color}; font-weight: 700;">{model_status}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Status dos Dados
-    data_status = "✅ Carregado" if X is not None and y is not None else "❌ Erro"
-    data_color = "#00D4AA" if X is not None and y is not None else "#FF6B6B"
-    
-    st.markdown(f"""
-    <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid {data_color};">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="color: #FAFAFA; font-weight: 600;">📊 Dataset Sensores</span>
-            <span style="color: {data_color}; font-weight: 700;">{data_status}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Status dos Dados de Treinamento
-    training_status = "✅ Carregado" if training_data is not None else "❌ Erro"
-    training_color = "#00D4AA" if training_data is not None else "#FF6B6B"
-    
-    st.markdown(f"""
-    <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid {training_color};">
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="color: #FAFAFA; font-weight: 600;">📈 Histórico de Treino</span>
-            <span style="color: {training_color}; font-weight: 700;">{training_status}</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def show_project_info(X, y, training_data):
-    """Mostra informações do projeto"""
-    
-    if X is not None and y is not None:
-        # Total de amostras
-        st.markdown(f"""
-        <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid #00D4AA;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="color: #FAFAFA; font-weight: 600;">📊 Total de Amostras</span>
-                <span style="color: #00D4AA; font-weight: 700;">{len(X):,}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Features
-        st.markdown(f"""
-        <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid #00D4AA;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <span style="color: #FAFAFA; font-weight: 600;">🔧 Features por Timestep</span>
-                <span style="color: #00D4AA; font-weight: 700;">{X.shape[1] if len(X.shape) > 1 else 'N/A'}</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Distribuição de falhas
-        if y is not None:
-            failure_rate = np.mean(y) * 100
-            st.markdown(f"""
-            <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid #00D4AA;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="color: #FAFAFA; font-weight: 600;">⚠️ Taxa de Falhas</span>
-                    <span style="color: #00D4AA; font-weight: 700;">{failure_rate:.1f}%</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Acurácia do modelo
-        if training_data is not None:
-            accuracy = training_data.get('final_evaluation', {}).get('test_accuracy', 0)
-            st.markdown(f"""
-            <div style="background: rgba(0, 212, 170, 0.1); padding: 0.8rem; border-radius: 8px; margin-bottom: 0.5rem; border-left: 3px solid #00D4AA;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span style="color: #FAFAFA; font-weight: 600;">🎯 Acurácia Final</span>
-                    <span style="color: #00D4AA; font-weight: 700;">{accuracy:.1%}</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-def main():
-    # Título principal com design premium
-    st.markdown('<h1 class="main-header fade-in">🔧 Sistema de Manutenção Preditiva com LSTM</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="text-secondary" style="text-align: center; font-size: 1.2rem; margin-bottom: 3rem;">Análise Inteligente de Falhas em Máquinas Industriais usando Deep Learning</p>', unsafe_allow_html=True)
-    
-    # Carregar dados e modelo
-    training_data = load_training_data()
-    X, y = load_processed_data()
-    model = load_model()
-    
-    # Verificar se os dados foram carregados (não deve falhar mais com o fallback)
-    if X is None or y is None:
-        st.error("Erro crítico: Não foi possível carregar ou gerar dados. Recarregue a página.")
-        return
-    
-    # Menu de navegação premium
-    with st.sidebar:
-        st.markdown("""
-        <div style="text-align: center; margin-bottom: 2rem;">
-            <h2 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 700;">🎯 Navegação</h2>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        selected = option_menu(
-            menu_title=None,
-            options=["Início", "Análise de Dados", "Modelo LSTM", "Treinamento", "Predições", "Insights"],
-            icons=["house", "bar-chart", "cpu", "graph-up", "magic", "lightbulb"],
-            menu_icon="cast",
-            default_index=0,
-            styles={
-                "container": {"padding": "0!important", "background-color": "transparent"},
-                "icon": {"color": "#00D4AA", "font-size": "20px"},
-                "nav-link": {
-                    "font-size": "16px",
-                    "text-align": "left",
-                    "margin": "0px",
-                    "--hover-color": "#1E1E1E",
-                    "color": "#B0B0B0",
-                    "font-family": "'Inter', sans-serif",
-                    "font-weight": "500",
-                },
-                "nav-link-selected": {
-                    "background-color": "rgba(0, 212, 170, 0.1)",
-                    "color": "#00D4AA",
-                    "border-left": "4px solid #00D4AA",
-                    "border-radius": "8px",
-                },
-            }
-        )
-        
-        # Separador
-        st.markdown("---")
-        
-        # Status do Sistema
-        st.markdown("""
-        <div style="margin-bottom: 1.5rem;">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 1rem;">📊 Status do Sistema</h3>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Status dos Componentes
-        show_system_status(model, training_data, X, y)
-        
-        # Separador
-        st.markdown("---")
-        
-        # Informações do Projeto
-        st.markdown("""
-        <div style="margin-bottom: 1.5rem;">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 1rem;">ℹ️ Informações</h3>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        show_project_info(X, y, training_data)
-    
-    # Navegação baseada na seleção
-    if selected == "Início":
-        show_home_page(X, y, training_data, model)
-    elif selected == "Análise de Dados":
-        show_data_analysis(X, y)
-    elif selected == "Modelo LSTM":
-        show_model_info(model)
-    elif selected == "Treinamento":
-        show_training_analysis(training_data)
-    elif selected == "Predições":
-        show_predictions_interface(X, y, model)
-    elif selected == "Insights":
-        show_insights(X, y, training_data, model)
-
-def show_home_page(X, y, training_data, model):
-    """Página inicial com visão geral premium"""
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 2rem;">🎯 Visão Geral do Sistema</h2>', unsafe_allow_html=True)
-    
-    # Cards de métricas premium
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        # Total de amostras
-        total_samples = len(X)
-        st.markdown(f'''
-        <div class="fade-in" style="background: linear-gradient(90deg, #00D4AA 100%, rgba(0, 212, 170, 0.1) 100%); border-radius: 6px; padding: 0.6rem; margin: 0.3rem 0; border: 1px solid rgba(0, 212, 170, 0.3); box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                <span style="color: #FFFFFF; font-weight: 600; font-size: 0.75rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">📊 Total Amostras</span>
-                <span style="color: #FFFFFF; font-weight: 700; font-size: 0.8rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">{total_samples:,}</span>
-            </div>
-            <div style="background: rgba(255, 255, 255, 0.3); border-radius: 3px; height: 2px; margin: 0.25rem 0;">
-                <div style="background: rgba(255, 255, 255, 0.6); height: 100%; width: 100%; border-radius: 3px;"></div>
-            </div>
-            <p style="color: #FFFFFF; margin-top: 0.25rem; font-size: 0.65rem; margin: 0; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Registros de sensores</p>
-        </div>
-        ''', unsafe_allow_html=True)
-    
-    with col2:
-        # Taxa de falhas
-        failure_rate = np.mean(y) * 100
-        failure_pct = min(failure_rate / 10, 100)  # Normalizar para 0-100%
-        
-        st.markdown(f'''
-        <div class="fade-in" style="background: linear-gradient(90deg, #FFB347 {failure_pct}%, rgba(255, 179, 71, 0.1) {failure_pct}%); border-radius: 6px; padding: 0.6rem; margin: 0.3rem 0; border: 1px solid rgba(255, 179, 71, 0.3); box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                <span style="color: #FFFFFF; font-weight: 600; font-size: 0.75rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">⚠️ Taxa Falhas</span>
-                <span style="color: #FFFFFF; font-weight: 700; font-size: 0.8rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">{failure_rate:.1f}%</span>
-            </div>
-            <div style="background: rgba(255, 255, 255, 0.3); border-radius: 3px; height: 2px; margin: 0.25rem 0;">
-                <div style="background: rgba(255, 255, 255, 0.6); height: 100%; width: 100%; border-radius: 3px;"></div>
-            </div>
-            <p style="color: #FFFFFF; margin-top: 0.25rem; font-size: 0.65rem; margin: 0; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Percentual de falhas</p>
-        </div>
-        ''', unsafe_allow_html=True)
-    
-    with col3:
-        # Features por timestep
-        features_count = X.shape[1] if len(X.shape) > 1 else 0
-        features_pct = min((features_count / 10) * 100, 100)  # Normalizar para 0-100%
-        
-        st.markdown(f'''
-        <div class="fade-in" style="background: linear-gradient(90deg, #00B4D8 {features_pct}%, rgba(0, 180, 216, 0.1) {features_pct}%); border-radius: 6px; padding: 0.6rem; margin: 0.3rem 0; border: 1px solid rgba(0, 180, 216, 0.3); box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                <span style="color: #FFFFFF; font-weight: 600; font-size: 0.75rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">🔧 Features</span>
-                <span style="color: #FFFFFF; font-weight: 700; font-size: 0.8rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">{features_count}</span>
-            </div>
-            <div style="background: rgba(255, 255, 255, 0.3); border-radius: 3px; height: 2px; margin: 0.25rem 0;">
-                <div style="background: rgba(255, 255, 255, 0.6); height: 100%; width: 100%; border-radius: 3px;"></div>
-            </div>
-            <p style="color: #FFFFFF; margin-top: 0.25rem; font-size: 0.65rem; margin: 0; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Sensores por timestep</p>
-        </div>
-        ''', unsafe_allow_html=True)
-    
-    with col4:
-        # Acurácia do modelo
-        if training_data is not None:
-            accuracy = training_data.get('final_evaluation', {}).get('test_accuracy', 0)
-            accuracy_pct = accuracy * 100
-        else:
-            accuracy_pct = 0
-        
-        st.markdown(f'''
-        <div class="fade-in" style="background: linear-gradient(90deg, #0077B6 {accuracy_pct}%, rgba(0, 119, 182, 0.1) {accuracy_pct}%); border-radius: 6px; padding: 0.6rem; margin: 0.3rem 0; border: 1px solid rgba(0, 119, 182, 0.3); box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
-                <span style="color: #FFFFFF; font-weight: 600; font-size: 0.75rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">🎯 Acurácia</span>
-                <span style="color: #FFFFFF; font-weight: 700; font-size: 0.8rem; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">{accuracy_pct:.1f}%</span>
-            </div>
-            <div style="background: rgba(255, 255, 255, 0.3); border-radius: 3px; height: 2px; margin: 0.25rem 0;">
-                <div style="background: rgba(255, 255, 255, 0.6); height: 100%; width: 100%; border-radius: 3px;"></div>
-            </div>
-            <p style="color: #FFFFFF; margin-top: 0.25rem; font-size: 0.65rem; margin: 0; text-shadow: 0 1px 3px rgba(0,0,0,0.8);">Performance do modelo</p>
-        </div>
-        ''', unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # Descrição do projeto com design premium
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 0.8rem; font-size: 1.1rem;">📝 Sobre o Sistema</h2>', unsafe_allow_html=True)
-    st.markdown("""
-    <div class="info-box">
-        <p style="font-size: 0.75rem; line-height: 1.4; margin: 0;">
-            Este sistema implementa <strong>manutenção preditiva inteligente</strong> utilizando 
-            <strong>Deep Learning</strong> com redes LSTM (Long Short-Term Memory). O objetivo é prever falhas 
-            em máquinas industriais a partir de dados de sensores, permitindo manutenção proativa 
-            e redução de custos operacionais.
-        </p>
-        <p style="font-size: 0.7rem; line-height: 1.4; margin: 0.5rem 0 0 0; color: #B0B0B0;">
-            <strong>🔧 Tecnologias:</strong> TensorFlow/Keras, LSTM, Análise de Séries Temporais, 
-            Visualização Interativa com Plotly.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Características principais com cards premium
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="data-card">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem; font-size: 0.95rem;">🔧 Características Técnicas</h3>
-            <ul style="color: #FAFAFA; line-height: 1.4; margin: 0; font-size: 0.75rem;">
-                <li><strong>Arquitetura</strong>: LSTM (Long Short-Term Memory)</li>
-                <li><strong>Features</strong>: 7 sensores por timestep</li>
-                <li><strong>Sequências</strong>: 50 timesteps consecutivos</li>
-                <li><strong>Classes</strong>: Falha (1) vs Normal (0)</li>
-                <li><strong>Preprocessamento</strong>: Normalização StandardScaler</li>
-                <li><strong>Validação</strong>: Split temporal 80/20</li>
-                <li><strong>Métricas</strong>: Accuracy, Loss, Binary Crossentropy</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class="data-card">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem; font-size: 0.95rem;">📊 Sensores Monitorados</h3>
-            <ul style="color: #FAFAFA; line-height: 1.4; margin: 0; font-size: 0.75rem;">
-                <li><strong>Temperatura do Ar</strong>: Monitoramento térmico</li>
-                <li><strong>Temperatura do Processo</strong>: Controle de processo</li>
-                <li><strong>Velocidade Rotacional</strong>: RPM das máquinas</li>
-                <li><strong>Torque</strong>: Força aplicada</li>
-                <li><strong>Desgaste da Ferramenta</strong>: Tempo de uso</li>
-                <li><strong>Tipo de Produto</strong>: Categorização (H/M/L)</li>
-                <li><strong>Identificadores</strong>: UDI e Product ID</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Gráfico de distribuição de falhas
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 1rem;">📈 Distribuição de Falhas</h2>', unsafe_allow_html=True)
-    
-    # Criar dados para o gráfico
-    failure_counts = np.bincount(y.astype(int))
-    failure_labels = ['Normal', 'Falha']
-    failure_colors = ['#00D4AA', '#FF6B6B']
-    
-    fig = px.pie(
-        values=failure_counts,
-        names=failure_labels,
-        title="Distribuição de Estados das Máquinas",
-        color_discrete_sequence=failure_colors
-    )
-    
-    fig.update_layout(
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        font_color='#FAFAFA',
-        title_font_size=16
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-def show_data_analysis(X, y):
-    """Análise detalhada dos dados de sensores"""
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 2rem;">📊 Análise dos Dados de Sensores</h2>', unsafe_allow_html=True)
-    
-    # Estatísticas gerais
-    st.markdown("### 📈 Estatísticas Gerais")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Total de Amostras", f"{len(X):,}")
-    with col2:
-        st.metric("Features por Amostra", f"{X.shape[1] if len(X.shape) > 1 else 'N/A'}")
-    with col3:
-        failure_count = np.sum(y)
-        st.metric("Total de Falhas", f"{failure_count:,}")
-    with col4:
-        failure_rate = np.mean(y) * 100
-        st.metric("Taxa de Falhas", f"{failure_rate:.2f}%")
-    
-    # Análise das features (assumindo que são as features do dataset original)
-    feature_names = [
-        'Air Temperature [K]',
-        'Process Temperature [K]', 
-        'Rotational Speed [rpm]',
-        'Torque [Nm]',
-        'Tool Wear [min]',
-        'Type_L',
-        'Type_M'
-    ]
-    
-    if X.shape[1] == len(feature_names):
-        st.markdown("### 🔧 Análise das Features")
-        
-        # Criar DataFrame para análise
-        df_features = pd.DataFrame(X, columns=feature_names)
-        df_features['Target'] = y
-        
-        # Estatísticas descritivas
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 📊 Estatísticas Descritivas")
-            st.dataframe(df_features.describe(), use_container_width=True)
-        
-        with col2:
-            st.markdown("#### 📈 Distribuição por Estado")
-            
-            # Análise por estado (normal vs falha)
-            normal_data = df_features[df_features['Target'] == 0]
-            failure_data = df_features[df_features['Target'] == 1]
-            
-            comparison_df = pd.DataFrame({
-                'Feature': feature_names,
-                'Normal_Mean': [normal_data[col].mean() for col in feature_names],
-                'Failure_Mean': [failure_data[col].mean() for col in feature_names],
-                'Difference': [failure_data[col].mean() - normal_data[col].mean() for col in feature_names]
-            })
-            
-            st.dataframe(comparison_df.round(3), use_container_width=True)
-        
-        # Visualizações das features
-        st.markdown("### 📊 Visualizações das Features")
-        
-        # Selecionar feature para análise detalhada
-        selected_feature = st.selectbox("Selecionar Feature para Análise:", feature_names)
-        
-        if selected_feature:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Box plot por estado
-                fig = px.box(
-                    df_features,
-                    x='Target',
-                    y=selected_feature,
-                    title=f"Distribuição de {selected_feature} por Estado",
-                    color='Target',
-                    color_discrete_sequence=['#00D4AA', '#FF6B6B']
-                )
-                
-                fig.update_layout(
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    font_color='#FAFAFA',
-                    xaxis_title="Estado (0=Normal, 1=Falha)",
-                    yaxis_title=selected_feature
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                # Histograma comparativo
-                fig = go.Figure()
-                
-                fig.add_trace(go.Histogram(
-                    x=normal_data[selected_feature],
-                    name='Normal',
-                    opacity=0.7,
-                    marker_color='#00D4AA'
-                ))
-                
-                fig.add_trace(go.Histogram(
-                    x=failure_data[selected_feature],
-                    name='Falha',
-                    opacity=0.7,
-                    marker_color='#FF6B6B'
-                ))
-                
-                fig.update_layout(
-                    title=f"Distribuição de {selected_feature}",
-                    xaxis_title=selected_feature,
-                    yaxis_title="Frequência",
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    font_color='#FAFAFA',
-                    barmode='overlay'
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Matriz de correlação
-        st.markdown("### 🔍 Matriz de Correlação")
-        
-        correlation_matrix = df_features.corr()
-        
-        fig = px.imshow(
-            correlation_matrix,
-            title="Matriz de Correlação das Features",
-            color_continuous_scale='RdBu_r',
-            aspect="auto"
-        )
-        
-        fig.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            font_color='#FAFAFA'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Análise de correlação com target
-        st.markdown("### 🎯 Correlação com Falhas")
-        
-        correlations_with_target = df_features[feature_names].corrwith(df_features['Target']).sort_values(ascending=False)
-        
-        fig = px.bar(
-            x=correlations_with_target.values,
-            y=correlations_with_target.index,
-            orientation='h',
-            title="Correlação das Features com Falhas",
-            color=correlations_with_target.values,
-            color_continuous_scale='RdBu_r'
-        )
-        
-        fig.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            font_color='#FAFAFA',
-            yaxis=dict(autorange="reversed"),
-            xaxis_title="Correlação",
-            yaxis_title="Features"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    
-    else:
-        st.warning(f"Número de features ({X.shape[1]}) não corresponde ao esperado ({len(feature_names)})")
-
-def show_model_info(model):
-    """Informações sobre o modelo LSTM"""
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 2rem;">🤖 Informações do Modelo LSTM</h2>', unsafe_allow_html=True)
-    
-    if model == "modelo_simulado":
-        st.info("Executando com modelo simulado devido a limitações técnicas.")
-        st.markdown("### 🔧 Modelo Simulado")
-        st.markdown("""
-        <div class="info-box">
-            <p>O modelo simulado utiliza uma função matemática simples para demonstrar as funcionalidades do sistema.
-            Em produção, seria utilizado um modelo LSTM treinado com dados reais.</p>
-        </div>
-        """, unsafe_allow_html=True)
-        return
-    
-    if model is not None:
-        # Arquitetura do modelo
-        st.markdown("### 🏗️ Arquitetura do Modelo")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            <div class="data-card">
-                <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem;">🔧 Estrutura da Rede</h3>
-                <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                    <li><strong>Camada 1:</strong> LSTM (64 unidades)</li>
-                    <li><strong>Input Shape:</strong> (50, 7)</li>
-                    <li><strong>Camada 2:</strong> Dropout (20%)</li>
-                    <li><strong>Camada 3:</strong> Dense (1 unidade, sigmoid)</li>
-                    <li><strong>Parâmetros:</strong> ~20K parâmetros</li>
-                </ul>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="data-card">
-                <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem;">⚙️ Configuração de Treino</h3>
-                <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                    <li><strong>Otimizador:</strong> Adam</li>
-                    <li><strong>Função de Perda:</strong> Binary Crossentropy</li>
-                    <li><strong>Métrica:</strong> Accuracy</li>
-                    <li><strong>Batch Size:</strong> 64</li>
-                    <li><strong>Épocas:</strong> 50</li>
-                </ul>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Resumo do modelo
-        st.markdown("### 📋 Resumo do Modelo")
-        
-        # Criar um resumo visual da arquitetura
-        model_summary = []
-        try:
-            if hasattr(model, 'summary'):
-                # Capturar o resumo do modelo
-                import io
-                import sys
-                from contextlib import redirect_stdout
-                
-                f = io.StringIO()
-                with redirect_stdout(f):
-                    model.summary()
-                model_summary = f.getvalue()
-            else:
-                model_summary = "Resumo não disponível para este tipo de modelo"
-        except:
-            model_summary = "Resumo não disponível"
-        
-        st.code(model_summary, language='text')
-        
-        # Informações técnicas
-        st.markdown("### 🔬 Informações Técnicas")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("""
-            <div class="info-box">
-                <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">🧠 LSTM</h4>
-                <p style="font-size: 0.8rem; margin: 0;">
-                    Long Short-Term Memory é ideal para sequências temporais, 
-                    mantendo memória de longo prazo para padrões complexos.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="info-box">
-                <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">🎯 Sigmoid</h4>
-                <p style="font-size: 0.8rem; margin: 0;">
-                    Função de ativação sigmoid produz probabilidades entre 0 e 1, 
-                    perfeita para classificação binária de falhas.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown("""
-            <div class="info-box">
-                <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">⚡ Dropout</h4>
-                <p style="font-size: 0.8rem; margin: 0;">
-                    Regularização que previne overfitting desligando 
-                    aleatoriamente 20% dos neurônios durante o treino.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Vantagens do modelo
-        st.markdown("### ✅ Vantagens da Arquitetura")
-        
-        st.markdown("""
-        <div class="success-box">
-            <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">🚀 Por que LSTM?</h4>
-            <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                <li><strong>Memória Temporal:</strong> LSTM lembra padrões de longo prazo nas sequências de sensores</li>
-                <li><strong>Detecção de Anomalias:</strong> Identifica desvios sutis que precedem falhas</li>
-                <li><strong>Robustez:</strong> Funciona bem mesmo com dados ruidosos de sensores industriais</li>
-                <li><strong>Eficiência:</strong> Arquitetura simples mas eficaz para o problema específico</li>
-                <li><strong>Interpretabilidade:</strong> Relativamente fácil de entender e debugar</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    else:
-        st.error("Modelo não carregado. Verifique se o arquivo do modelo existe.")
-
-def show_training_analysis(training_data):
-    """Análise detalhada do treinamento do modelo"""
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 2rem;">📈 Análise do Treinamento</h2>', unsafe_allow_html=True)
-    
-    if training_data is None:
-        st.error("Dados de treinamento não disponíveis.")
-        return
-    
-    # Métricas finais
-    st.markdown("### 🎯 Métricas Finais")
-    
-    final_eval = training_data.get('final_evaluation', {})
-    training_params = training_data.get('training_parameters', {})
-    dataset_info = training_data.get('dataset_info', {})
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        test_accuracy = final_eval.get('test_accuracy', 0)
-        st.metric("Acurácia Final", f"{test_accuracy:.1%}")
-    
-    with col2:
-        test_loss = final_eval.get('test_loss', 0)
-        st.metric("Perda Final", f"{test_loss:.4f}")
-    
-    with col3:
-        epochs = training_params.get('epochs', 0)
-        st.metric("Épocas Treinadas", f"{epochs}")
-    
-    with col4:
-        training_samples = dataset_info.get('training_samples', 0)
-        st.metric("Amostras Treino", f"{training_samples:,}")
-    
-    # Parâmetros de treinamento
-    st.markdown("### ⚙️ Parâmetros de Treinamento")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="data-card">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem;">🔧 Configurações</h3>
-            <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                <li><strong>Épocas:</strong> {}</li>
-                <li><strong>Batch Size:</strong> {}</li>
-                <li><strong>Sequence Length:</strong> {}</li>
-                <li><strong>Amostras Treino:</strong> {:,}</li>
-                <li><strong>Amostras Teste:</strong> {:,}</li>
-                <li><strong>Features por Timestep:</strong> {}</li>
-            </ul>
-        </div>
-        """.format(
-            training_params.get('epochs', 'N/A'),
-            training_params.get('batch_size', 'N/A'),
-            training_params.get('sequence_length', 'N/A'),
-            dataset_info.get('training_samples', 0),
-            dataset_info.get('testing_samples', 0),
-            dataset_info.get('features_per_timestep', 'N/A')
-        ), unsafe_allow_html=True)
-    
-    with col2:
-        # Class weights (se disponível)
-        st.markdown("""
-        <div class="info-box">
-            <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">⚖️ Balanceamento de Classes</h4>
-            <p style="font-size: 0.8rem; margin: 0;">
-                O modelo utilizou class weights para lidar com o desequilíbrio entre 
-                classes (normal vs falha), garantindo melhor performance na detecção de falhas.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Gráficos de treinamento
-    st.markdown("### 📊 Evolução do Treinamento")
-    
-    training_history = training_data.get('training_history', {})
-    
-    if training_history:
-        # Criar gráficos de accuracy e loss
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Gráfico de Accuracy
-            epochs_range = list(range(1, len(training_history.get('accuracy', [])) + 1))
-            
-            fig = go.Figure()
-            
-            fig.add_trace(go.Scatter(
-                x=epochs_range,
-                y=training_history.get('accuracy', []),
-                mode='lines+markers',
-                name='Treino',
-                line=dict(color='#00D4AA', width=3),
-                marker=dict(size=6)
-            ))
-            
-            fig.add_trace(go.Scatter(
-                x=epochs_range,
-                y=training_history.get('val_accuracy', []),
-                mode='lines+markers',
-                name='Validação',
-                line=dict(color='#FFB347', width=3),
-                marker=dict(size=6)
-            ))
-            
-            fig.update_layout(
-                title="Evolução da Acurácia",
-                xaxis_title="Época",
-                yaxis_title="Acurácia",
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                font_color='#FAFAFA',
-                legend=dict(x=0, y=1)
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            # Gráfico de Loss
-            fig = go.Figure()
-            
-            fig.add_trace(go.Scatter(
-                x=epochs_range,
-                y=training_history.get('loss', []),
-                mode='lines+markers',
-                name='Treino',
-                line=dict(color='#FF6B6B', width=3),
-                marker=dict(size=6)
-            ))
-            
-            fig.add_trace(go.Scatter(
-                x=epochs_range,
-                y=training_history.get('val_loss', []),
-                mode='lines+markers',
-                name='Validação',
-                line=dict(color='#FFB347', width=3),
-                marker=dict(size=6)
-            ))
-            
-            fig.update_layout(
-                title="Evolução da Perda",
-                xaxis_title="Época",
-                yaxis_title="Perda",
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                font_color='#FAFAFA',
-                legend=dict(x=0, y=1)
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Análise de convergência
-        st.markdown("### 🔍 Análise de Convergência")
-        
-        # Calcular métricas de convergência
-        train_acc = training_history.get('accuracy', [])
-        val_acc = training_history.get('val_accuracy', [])
-        
-        if train_acc and val_acc:
-            final_train_acc = train_acc[-1]
-            final_val_acc = val_acc[-1]
-            overfitting = final_train_acc - final_val_acc
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Acurácia Treino Final", f"{final_train_acc:.1%}")
-            
-            with col2:
-                st.metric("Acurácia Validação Final", f"{final_val_acc:.1%}")
-            
-            with col3:
-                if overfitting > 0.05:
-                    color = "inverse"
-                    st.metric("Gap de Overfitting", f"{overfitting:.1%}", delta="Alto")
-                else:
-                    color = "normal"
-                    st.metric("Gap de Overfitting", f"{overfitting:.1%}", delta="Baixo")
-        
-        # Insights do treinamento
-        st.markdown("### 💡 Insights do Treinamento")
-        
-        if train_acc and val_acc:
-            # Encontrar época de melhor validação
-            best_val_epoch = np.argmax(val_acc) + 1
-            best_val_acc = max(val_acc)
-            
-            st.markdown(f"""
-            <div class="success-box">
-                <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">🎯 Melhor Performance</h4>
-                <p style="font-size: 0.85rem; margin: 0;">
-                    <strong>Melhor época de validação:</strong> Época {best_val_epoch}<br>
-                    <strong>Melhor acurácia de validação:</strong> {best_val_acc:.1%}<br>
-                    <strong>Performance final:</strong> {final_eval.get('test_accuracy', 0):.1%}
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Recomendações
-        st.markdown("### 🚀 Recomendações")
-        
-        recommendations = []
-        
-        if overfitting > 0.05:
-            recommendations.append("Considerar aumento do dropout ou early stopping")
-        
-        if final_val_acc < 0.9:
-            recommendations.append("Avaliar aumento do número de épocas ou ajuste de hiperparâmetros")
-        
-        if not recommendations:
-            recommendations.append("Modelo treinado com boa performance e baixo overfitting")
-        
-        for i, rec in enumerate(recommendations, 1):
-            st.markdown(f"""
-            <div class="info-box">
-                <p style="font-size: 0.8rem; margin: 0;"><strong>{i}.</strong> {rec}</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-def show_predictions_interface(X, y, model):
-    """Interface para predições interativas"""
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 2rem;">🔮 Interface de Predições</h2>', unsafe_allow_html=True)
-    
-    if model is None:
-        st.error("Modelo não carregado. Não é possível fazer predições.")
-        return
-    
-    # Criar abas para diferentes tipos de predição
-    tab1, tab2 = st.tabs(["🎲 Predição Aleatória", "📊 Predição Personalizada"])
-    
-    with tab1:
-        show_random_prediction(X, y, model)
-    
-    with tab2:
-        show_custom_prediction(model)
-
-def show_random_prediction(X, y, model):
-    """Predição com dados aleatórios do dataset"""
-    st.markdown("### 🎲 Análise de Amostra Aleatória")
-    st.markdown("Selecione uma amostra aleatória do dataset para análise:")
-    
-    if st.button("🎯 Gerar Amostra Aleatória", type="primary"):
-        # Selecionar índice aleatório
-        random_idx = np.random.randint(0, len(X))
-        
-        # Obter dados da amostra
-        sample_X = X[random_idx:random_idx+1]
-        sample_y = y[random_idx]
-        
-        # Fazer predição
-        with st.spinner("Analisando..."):
-            # Para LSTM, precisamos criar uma sequência
-            # Vamos simular uma sequência baseada na amostra
-            sequence_length = 50
-            sequence_X = np.tile(sample_X, (sequence_length, 1)).reshape(1, sequence_length, -1)
-            
-            # Garantir que os dados estejam no formato correto
-            sequence_X = sequence_X.astype('float32')
-            
-            if model == "modelo_simulado":
-                # Simular predição baseada nos dados da amostra
-                # Usar os valores normalizados da amostra para calcular risco
-                sample_values = sample_X[0]  # Primeira (e única) amostra
-                
-                # Calcular score de risco baseado nos valores normalizados
-                risk_score = (
-                    0.2 * max(0, sample_values[0] - 1.5) +      # Air temp alta
-                    0.2 * max(0, sample_values[1] - 1.5) +      # Process temp alta
-                    0.1 * max(0, sample_values[3] - 1.5) +      # Torque alto
-                    0.3 * max(0, sample_values[4] - 1.5) +      # Tool wear alto
-                    0.1 * max(0, abs(sample_values[2]) - 1.5) + # Velocidade anômala
-                    0.1 * np.random.random()  # Ruído aleatório
-                )
-                
-                # Converter para probabilidade usando sigmoid
-                prediction_prob = 1 / (1 + np.exp(-risk_score * 2))
-                prediction = 1 if prediction_prob > 0.5 else 0
-            else:
-                prediction_prob = model.predict(sequence_X, verbose=0)[0][0]
-                prediction = 1 if prediction_prob > 0.5 else 0
-        
-        # Mostrar resultados
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 📊 Dados da Amostra")
-            
-            feature_names = [
-                'Air Temperature [K]',
-                'Process Temperature [K]', 
-                'Rotational Speed [rpm]',
-                'Torque [Nm]',
-                'Tool Wear [min]',
-                'Type_L',
-                'Type_M'
+                tf.keras.layers.Dense(1, activation="sigmoid"),
             ]
-            
-            sample_data = pd.DataFrame({
-                'Feature': feature_names,
-                'Valor': sample_X[0]
-            })
-            
-            st.dataframe(sample_data, use_container_width=True)
-        
-        with col2:
-            st.markdown("#### 🎯 Resultado da Predição")
-            
-            # Cores minimalistas baseadas na predição
-            if prediction == 1:
-                color = "#E74C3C"
-                label = "FALHA DETECTADA"
-                bg_color = "rgba(231, 76, 60, 0.1)"
-                border_color = "#E74C3C"
-            else:
-                color = "#2ECC71"
-                label = "FUNCIONAMENTO NORMAL"
-                bg_color = "rgba(46, 204, 113, 0.1)"
-                border_color = "#2ECC71"
-            
-            # Card principal de resultado - minimalista
-            st.markdown(f'''
-            <div style="background: {bg_color}; border: 2px solid {border_color}; border-radius: 12px; padding: 1.5rem; margin: 0.5rem 0; text-align: center;">
-                <h4 style="color: {color}; font-family: 'Inter', sans-serif; font-weight: 600; margin: 0 0 1rem 0; font-size: 1.1rem; letter-spacing: 0.5px;">
-                    {label}
-                </h4>
-                <p style="color: #FFFFFF; font-size: 2rem; margin: 0; font-weight: 300;">
-                    {prediction_prob:.1%}
-                </p>
-            </div>
-            ''', unsafe_allow_html=True)
-            
-            # Informações adicionais em cards menores
-            col2_1, col2_2 = st.columns(2)
-            
-            with col2_1:
-                # Estado real
-                real_color = "#E74C3C" if sample_y == 1 else "#2ECC71"
-                real_label = "Falha" if sample_y == 1 else "Normal"
-                
-                st.markdown(f'''
-                <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid {real_color}; border-radius: 8px; padding: 0.8rem; text-align: center;">
-                    <p style="color: #888888; font-size: 0.75rem; margin: 0 0 0.3rem 0; text-transform: uppercase; letter-spacing: 0.5px;">Estado Real</p>
-                    <p style="color: {real_color}; font-size: 1rem; margin: 0; font-weight: 500;">{real_label}</p>
-                </div>
-                ''', unsafe_allow_html=True)
-            
-            with col2_2:
-                # Status da predição
-                if prediction == sample_y:
-                    status_color = "#2ECC71"
-                    status_text = "Correto"
-                else:
-                    status_color = "#F39C12"
-                    status_text = "Incorreto"
-                
-                st.markdown(f'''
-                <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid {status_color}; border-radius: 8px; padding: 0.8rem; text-align: center;">
-                    <p style="color: #888888; font-size: 0.75rem; margin: 0 0 0.3rem 0; text-transform: uppercase; letter-spacing: 0.5px;">Precisão</p>
-                    <p style="color: {status_color}; font-size: 1rem; margin: 0; font-weight: 500;">{status_text}</p>
-                </div>
-                ''', unsafe_allow_html=True)
-            
-            # Gráfico de probabilidade minimalista
-            fig = go.Figure(go.Indicator(
-                mode = "gauge+number",
-                value = prediction_prob * 100,
-                domain = {'x': [0, 1], 'y': [0, 1]},
-                title = {'text': "Probabilidade de Falha", 'font': {'size': 14, 'color': '#FFFFFF'}},
-                gauge = {
-                    'axis': {'range': [None, 100], 'tickfont': {'size': 10, 'color': '#888888'}},
-                    'bar': {'color': color},
-                    'steps': [
-                        {'range': [0, 50], 'color': "rgba(46, 204, 113, 0.1)"},
-                        {'range': [50, 100], 'color': "rgba(231, 76, 60, 0.1)"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "#888888", 'width': 2},
-                        'thickness': 0.6,
-                        'value': 50
-                    }
-                },
-                number = {'font': {'size': 24, 'color': '#FFFFFF'}}
-            ))
-            
-            fig.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                font_color='#FAFAFA',
-                height=250,
-                margin=dict(l=20, r=20, t=40, b=20)
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-
-def show_custom_prediction(model):
-    """Predição com valores personalizados"""
-    st.markdown("### 📊 Análise Personalizada")
-    st.markdown("Insira valores dos sensores para análise personalizada:")
-    
-    # Criar formulário com campos organizados
-    with st.form("prediction_form"):
-        # Layout em 3 colunas para melhor organização
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("#### Sensores Térmicos")
-            air_temp = st.number_input(
-                "Temperatura do Ar [K]",
-                min_value=280.0,
-                max_value=350.0,
-                value=300.0,
-                step=0.1,
-                help="Temperatura ambiente em Kelvin"
-            )
-            
-            process_temp = st.number_input(
-                "Temperatura do Processo [K]",
-                min_value=280.0,
-                max_value=350.0,
-                value=310.0,
-                step=0.1,
-                help="Temperatura do processo em Kelvin"
-            )
-        
-        with col2:
-            st.markdown("#### Sensores Mecânicos")
-            rotational_speed = st.number_input(
-                "Velocidade Rotacional [rpm]",
-                min_value=1000,
-                max_value=3000,
-                value=1500,
-                step=50,
-                help="Velocidade de rotação em RPM"
-            )
-            
-            torque = st.number_input(
-                "Torque [Nm]",
-                min_value=0.0,
-                max_value=100.0,
-                value=20.0,
-                step=0.5,
-                help="Torque aplicado em Newton-metros"
-            )
-        
-        with col3:
-            st.markdown("#### Sensores de Desgaste")
-            tool_wear = st.number_input(
-                "Desgaste da Ferramenta [min]",
-                min_value=0,
-                max_value=300,
-                value=50,
-                step=5,
-                help="Tempo de uso da ferramenta em minutos"
-            )
-            
-            product_type = st.selectbox(
-                "Tipo de Produto",
-                ["H", "L", "M"],
-                help="Tipo de produto sendo processado"
-            )
-            
-            # Converter tipo para dummy variables
-            type_h = 1 if product_type == "H" else 0
-            type_l = 1 if product_type == "L" else 0
-            type_m = 1 if product_type == "M" else 0
-        
-        # Botão centralizado com separador
-        st.markdown("---")
-        col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
-        with col_btn2:
-            submitted = st.form_submit_button("Analisar", type="primary", use_container_width=True)
-        
-        if submitted:
-            # Preparar dados para predição
-            input_data = np.array([[
-                air_temp, process_temp, rotational_speed, torque, tool_wear, type_l, type_m
-            ]])
-            
-            # Criar sequência para LSTM
-            sequence_length = 50
-            sequence_data = np.tile(input_data, (sequence_length, 1)).reshape(1, sequence_length, -1)
-            
-            # Garantir que os dados estejam no formato correto
-            sequence_data = sequence_data.astype('float32')
-            
-            with st.spinner("Analisando..."):
-                if model == "modelo_simulado":
-                    # Simular predição baseada nos valores de entrada com lógica mais realista
-                    # Normalizar os valores de entrada para calcular risco
-                    air_temp_norm = (air_temp - 300) / 15  # Normalizar baseado na distribuição
-                    process_temp_norm = (process_temp - 310) / 15
-                    rotational_speed_norm = (rotational_speed - 2000) / 300
-                    torque_norm = (torque - 40) / 15
-                    tool_wear_norm = (tool_wear - 150) / 50
-                    
-                    # Calcular score de risco baseado em padrões realistas
-                    risk_score = (
-                        0.2 * max(0, air_temp_norm - 1.5) +      # Temp alta
-                        0.2 * max(0, process_temp_norm - 1.5) +  # Process temp alta
-                        0.1 * max(0, torque_norm - 1.5) +        # Torque alto
-                        0.3 * max(0, tool_wear_norm - 1.5) +     # Tool wear alto
-                        0.1 * max(0, abs(rotational_speed_norm) - 1.5) +  # Velocidade anômala
-                        0.1 * np.random.random()  # Ruído aleatório
-                    )
-                    
-                    # Converter para probabilidade usando sigmoid
-                    prediction_prob = 1 / (1 + np.exp(-risk_score * 2))
-                    prediction = 1 if prediction_prob > 0.5 else 0
-                else:
-                    prediction_prob = model.predict(sequence_data, verbose=0)[0][0]
-                    prediction = 1 if prediction_prob > 0.5 else 0
-            
-            # Mostrar resultado
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if prediction == 1:
-                    color = "#E74C3C"
-                    label = "FALHA DETECTADA"
-                    message = "Atenção! O modelo detectou sinais de possível falha."
-                    bg_color = "rgba(231, 76, 60, 0.1)"
-                    border_color = "#E74C3C"
-                else:
-                    color = "#2ECC71"
-                    label = "FUNCIONAMENTO NORMAL"
-                    message = "Sistema funcionando normalmente."
-                    bg_color = "rgba(46, 204, 113, 0.1)"
-                    border_color = "#2ECC71"
-                
-                # Card principal de resultado - minimalista
-                st.markdown(f'''
-                <div style="background: {bg_color}; border: 2px solid {border_color}; border-radius: 12px; padding: 1.5rem; margin: 0.5rem 0; text-align: center;">
-                    <h4 style="color: {color}; font-family: 'Inter', sans-serif; font-weight: 600; margin: 0 0 1rem 0; font-size: 1.1rem; letter-spacing: 0.5px;">
-                        {label}
-                    </h4>
-                    <p style="color: #FFFFFF; font-size: 2rem; margin: 0 0 0.5rem 0; font-weight: 300;">
-                        {prediction_prob:.1%}
-                    </p>
-                    <p style="color: #888888; font-size: 0.85rem; margin: 0; font-weight: 400;">
-                        {message}
-                    </p>
-                </div>
-                ''', unsafe_allow_html=True)
-            
-            with col2:
-                # Gráfico de probabilidade minimalista
-                fig = go.Figure(go.Indicator(
-                    mode = "gauge+number",
-                    value = prediction_prob * 100,
-                    domain = {'x': [0, 1], 'y': [0, 1]},
-                    title = {'text': "Probabilidade de Falha", 'font': {'size': 14, 'color': '#FFFFFF'}},
-                    gauge = {
-                        'axis': {'range': [None, 100], 'tickfont': {'size': 10, 'color': '#888888'}},
-                        'bar': {'color': color},
-                        'steps': [
-                            {'range': [0, 50], 'color': "rgba(46, 204, 113, 0.1)"},
-                            {'range': [50, 100], 'color': "rgba(231, 76, 60, 0.1)"}
-                        ],
-                        'threshold': {
-                            'line': {'color': "#888888", 'width': 2},
-                            'thickness': 0.6,
-                            'value': 50
-                        }
-                    },
-                    number = {'font': {'size': 24, 'color': '#FFFFFF'}}
-                ))
-                
-                fig.update_layout(
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    font_color='#FAFAFA',
-                    height=250,
-                    margin=dict(l=20, r=20, t=40, b=20)
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Interpretação dos resultados minimalista
-            if prediction_prob > 0.7:
-                rec_color = "#E74C3C"
-                rec_text = "Alta probabilidade de falha. Recomenda-se inspeção imediata."
-            elif prediction_prob > 0.5:
-                rec_color = "#F39C12"
-                rec_text = "Probabilidade moderada de falha. Monitoramento recomendado."
-            else:
-                rec_color = "#2ECC71"
-                rec_text = "Baixa probabilidade de falha. Sistema operando normalmente."
-            
-            st.markdown(f'''
-            <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid {rec_color}; border-radius: 8px; padding: 1rem; margin: 1rem 0;">
-                <p style="color: {rec_color}; font-size: 0.9rem; margin: 0; font-weight: 500; text-align: center;">{rec_text}</p>
-            </div>
-            ''', unsafe_allow_html=True)
-
-def show_insights(X, y, training_data, model):
-    """Insights avançados e análises do sistema"""
-    st.markdown('<h2 style="color: #00D4AA; font-family: \'Inter\', sans-serif; font-weight: 600; margin-bottom: 2rem;">💡 Insights Avançados</h2>', unsafe_allow_html=True)
-    
-    # Criar abas para diferentes tipos de insights
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Análise de Performance", "🔍 Padrões de Falhas", "⚡ Otimizações", "🎯 Recomendações"])
-    
-    with tab1:
-        show_performance_insights(X, y, training_data, model)
-    
-    with tab2:
-        show_failure_patterns(X, y)
-    
-    with tab3:
-        show_optimization_insights(training_data)
-    
-    with tab4:
-        show_recommendations(X, y, training_data, model)
-
-def show_performance_insights(X, y, training_data, model):
-    """Insights sobre performance do modelo"""
-    st.markdown("### 📊 Análise de Performance do Modelo")
-    
-    if training_data is None:
-        st.error("Dados de treinamento não disponíveis.")
-        return
-    
-    # Métricas de performance
-    final_eval = training_data.get('final_evaluation', {})
-    test_accuracy = final_eval.get('test_accuracy', 0)
-    test_loss = final_eval.get('test_loss', 0)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Acurácia Final", f"{test_accuracy:.1%}")
-    
-    with col2:
-        st.metric("Perda Final", f"{test_loss:.4f}")
-    
-    with col3:
-        # Calcular precisão estimada
-        precision_est = test_accuracy * 0.95  # Estimativa baseada na acurácia
-        st.metric("Precisão Estimada", f"{precision_est:.1%}")
-    
-    with col4:
-        # Calcular recall estimado
-        recall_est = test_accuracy * 0.90  # Estimativa baseada na acurácia
-        st.metric("Recall Estimado", f"{recall_est:.1%}")
-    
-    # Análise de confiabilidade
-    st.markdown("### 🎯 Análise de Confiabilidade")
-    
-    if test_accuracy >= 0.95:
-        reliability_level = "Excelente"
-        reliability_color = "#00D4AA"
-        reliability_message = "Modelo altamente confiável para produção"
-    elif test_accuracy >= 0.90:
-        reliability_level = "Boa"
-        reliability_color = "#FFB347"
-        reliability_message = "Modelo adequado para uso em produção"
-    else:
-        reliability_level = "Moderada"
-        reliability_color = "#FF6B6B"
-        reliability_message = "Modelo necessita melhorias antes da produção"
-    
-    st.markdown(f"""
-    <div style="background: {reliability_color}; border-radius: 12px; padding: 1.5rem; margin: 1rem 0; text-align: center;">
-        <h3 style="color: #FFFFFF; font-family: 'Inter', sans-serif; font-weight: 700; margin-bottom: 0.5rem;">
-            🎯 Nível de Confiabilidade: {reliability_level}
-        </h3>
-        <p style="color: #FFFFFF; font-size: 1rem; margin: 0;">
-            {reliability_message}
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Comparação com benchmarks
-    st.markdown("### 📈 Comparação com Benchmarks")
-    
-    benchmarks = {
-        "Modelo LSTM Atual": test_accuracy,
-        "Random Forest": 0.92,
-        "SVM": 0.89,
-        "Logistic Regression": 0.85,
-        "Naive Bayes": 0.78
-    }
-    
-    benchmark_df = pd.DataFrame(list(benchmarks.items()), columns=['Modelo', 'Acurácia'])
-    
-    fig = px.bar(
-        benchmark_df,
-        x='Modelo',
-        y='Acurácia',
-        title="Comparação de Performance com Outros Modelos",
-        color='Acurácia',
-        color_continuous_scale='Viridis'
-    )
-    
-    fig.update_layout(
-        plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        font_color='#FAFAFA',
-        xaxis_title="Modelo",
-        yaxis_title="Acurácia"
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Vantagens do LSTM
-    st.markdown("### 🚀 Vantagens do LSTM")
-    
-    st.markdown("""
-    <div class="success-box">
-        <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">🎯 Por que LSTM supera outros modelos?</h4>
-        <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-            <li><strong>Memória Temporal:</strong> LSTM captura dependências temporais que outros modelos ignoram</li>
-            <li><strong>Padrões Sequenciais:</strong> Identifica padrões complexos em sequências de sensores</li>
-            <li><strong>Robustez:</strong> Funciona bem com dados ruidosos típicos de ambientes industriais</li>
-            <li><strong>Escalabilidade:</strong> Pode ser facilmente expandido para mais sensores</li>
-            <li><strong>Interpretabilidade:</strong> Saída probabilística facilita tomada de decisões</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-
-def show_failure_patterns(X, y):
-    """Análise de padrões de falhas"""
-    st.markdown("### 🔍 Padrões de Falhas Identificados")
-    
-    # Criar DataFrame para análise
-    feature_names = [
-        'Air Temperature [K]',
-        'Process Temperature [K]', 
-        'Rotational Speed [rpm]',
-        'Torque [Nm]',
-        'Tool Wear [min]',
-        'Type_L',
-        'Type_M'
-    ]
-    
-    if X.shape[1] == len(feature_names):
-        df_analysis = pd.DataFrame(X, columns=feature_names)
-        df_analysis['Target'] = y
-        
-        # Análise de correlação com falhas
-        st.markdown("#### 📊 Correlação das Features com Falhas")
-        
-        correlations = df_analysis[feature_names].corrwith(df_analysis['Target']).sort_values(ascending=False)
-        
-        fig = px.bar(
-            x=correlations.values,
-            y=correlations.index,
-            orientation='h',
-            title="Correlação das Features com Falhas",
-            color=correlations.values,
-            color_continuous_scale='RdBu_r'
         )
-        
-        fig.update_layout(
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            font_color='#FAFAFA',
-            yaxis=dict(autorange="reversed"),
-            xaxis_title="Correlação",
-            yaxis_title="Features"
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Análise de thresholds críticos
-        st.markdown("#### ⚠️ Thresholds Críticos Identificados")
-        
-        failure_data = df_analysis[df_analysis['Target'] == 1]
-        normal_data = df_analysis[df_analysis['Target'] == 0]
-        
-        thresholds = {}
-        for feature in feature_names:
-            if feature not in ['Type_L', 'Type_M']:  # Pular variáveis categóricas
-                failure_mean = failure_data[feature].mean()
-                normal_mean = normal_data[feature].mean()
-                
-                if abs(failure_mean - normal_mean) > normal_data[feature].std():
-                    thresholds[feature] = {
-                        'failure_mean': failure_mean,
-                        'normal_mean': normal_mean,
-                        'difference': failure_mean - normal_mean
-                    }
-        
-        if thresholds:
-            threshold_df = pd.DataFrame([
-                {
-                    'Feature': feat,
-                    'Média Normal': f"{data['normal_mean']:.2f}",
-                    'Média Falha': f"{data['failure_mean']:.2f}",
-                    'Diferença': f"{data['difference']:.2f}",
-                    'Impacto': 'Alto' if abs(data['difference']) > normal_data[feat].std() else 'Médio'
-                }
-                for feat, data in thresholds.items()
-            ])
-            
-            st.dataframe(threshold_df, use_container_width=True)
-        
-        # Padrões temporais (simulado)
-        st.markdown("#### ⏰ Padrões Temporais de Falhas")
-        
-        # Simular padrões temporais baseados nos dados
-        failure_indices = np.where(y == 1)[0]
-        
-        if len(failure_indices) > 10:
-            # Análise de distribuição de falhas
-            fig = px.histogram(
-                x=failure_indices,
-                title="Distribuição Temporal das Falhas",
-                nbins=20,
-                color_discrete_sequence=['#FF6B6B']
-            )
-            
-            fig.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
-                font_color='#FAFAFA',
-                xaxis_title="Índice Temporal",
-                yaxis_title="Frequência de Falhas"
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Insights sobre padrões
-        st.markdown("#### 💡 Insights dos Padrões")
-        
-        insights = []
-        
-        # Analisar correlações fortes
-        strong_correlations = correlations[abs(correlations) > 0.1]
-        if len(strong_correlations) > 0:
-            top_correlation = strong_correlations.index[0]
-            insights.append(f"<strong>{top_correlation}</strong> mostra a correlação mais forte com falhas")
-        
-        # Analisar thresholds críticos
-        if len(thresholds) > 0:
-            insights.append(f"{len(thresholds)} features apresentam thresholds críticos para falhas")
-        
-        # Analisar distribuição temporal
-        if len(failure_indices) > 0:
-            failure_clusters = len(failure_indices) // 10
-            insights.append(f"Falhas tendem a ocorrer em {failure_clusters} clusters temporais")
-        
-        for i, insight in enumerate(insights, 1):
-            st.markdown(f"""
-            <div class="info-box">
-                <p style="font-size: 0.8rem; margin: 0;"><strong>{i}.</strong> {insight}</p>
-            </div>
-            """, unsafe_allow_html=True)
-    
+        model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    return model
+
+
+def manual_reading_to_array(reading: ManualReading) -> np.ndarray:
+    type_l = 1.0 if reading.product_type == "L" else 0.0
+    type_m = 1.0 if reading.product_type == "M" else 0.0
+    return np.array(
+        [
+            reading.air_temperature_k,
+            reading.process_temperature_k,
+            reading.rotational_speed_rpm,
+            reading.torque_nm,
+            reading.tool_wear_min,
+            type_l,
+            type_m,
+        ],
+        dtype="float32",
+    )
+
+
+def ensure_sequence(payload: PredictionRequest) -> np.ndarray:
+    if payload.sequence:
+        array = np.asarray(payload.sequence, dtype="float32")
+        if array.ndim != 2 or array.shape[1] != len(FEATURE_NAMES):
+            raise HTTPException(status_code=400, detail=f"Sequence must be of shape [steps, {len(FEATURE_NAMES)}].")
+        if array.shape[0] < SEQUENCE_LENGTH:
+            padding = np.repeat(array[-1, :][None, :], SEQUENCE_LENGTH - array.shape[0], axis=0)
+            array = np.vstack([array, padding])
+        elif array.shape[0] > SEQUENCE_LENGTH:
+            array = array[-SEQUENCE_LENGTH:, :]
+        return array
+
+    if payload.reading is None:
+        raise HTTPException(status_code=400, detail="Provide either `sequence` or `reading`.")
+
+    reading_array = manual_reading_to_array(payload.reading)
+    sequence = np.tile(reading_array, (SEQUENCE_LENGTH, 1))
+    return sequence
+
+
+def run_inference(sequence: np.ndarray) -> float:
+    batch = sequence.reshape(1, SEQUENCE_LENGTH, len(FEATURE_NAMES)).astype("float32")
+
+    if isinstance(MODEL, SimulatedModel):
+        probability = float(MODEL.predict(batch)[0][0])
     else:
-        st.warning("Análise de padrões não disponível devido a incompatibilidade de features")
+        probability = float(MODEL.predict(batch, verbose=0)[0][0])
+    return float(np.clip(probability, 0.0, 1.0))
 
-def show_optimization_insights(training_data):
-    """Insights sobre otimizações possíveis"""
-    st.markdown("### ⚡ Otimizações e Melhorias")
-    
-    if training_data is None:
-        st.error("Dados de treinamento não disponíveis.")
-        return
-    
-    # Análise de hiperparâmetros
-    st.markdown("#### 🔧 Análise de Hiperparâmetros")
-    
-    training_params = training_data.get('training_parameters', {})
-    training_history = training_data.get('training_history', {})
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="data-card">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem;">📊 Hiperparâmetros Atuais</h3>
-            <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                <li><strong>Épocas:</strong> {}</li>
-                <li><strong>Batch Size:</strong> {}</li>
-                <li><strong>Sequence Length:</strong> {}</li>
-                <li><strong>LSTM Units:</strong> 64</li>
-                <li><strong>Dropout:</strong> 0.2</li>
-                <li><strong>Otimizador:</strong> Adam</li>
-            </ul>
-        </div>
-        """.format(
-            training_params.get('epochs', 'N/A'),
-            training_params.get('batch_size', 'N/A'),
-            training_params.get('sequence_length', 'N/A')
-        ), unsafe_allow_html=True)
-    
-    with col2:
-        # Análise de convergência
-        if training_history:
-            train_acc = training_history.get('accuracy', [])
-            val_acc = training_history.get('val_accuracy', [])
-            
-            if train_acc and val_acc:
-                final_train_acc = train_acc[-1]
-                final_val_acc = val_acc[-1]
-                overfitting = final_train_acc - final_val_acc
-                
-                if overfitting > 0.05:
-                    optimization_status = "⚠️ Overfitting Detectado"
-                    optimization_color = "#FFB347"
-                    optimization_message = "Considere aumentar dropout ou early stopping"
-                else:
-                    optimization_status = "✅ Convergência Adequada"
-                    optimization_color = "#00D4AA"
-                    optimization_message = "Modelo convergiu adequadamente"
-                
-                st.markdown(f"""
-                <div style="background: {optimization_color}; border-radius: 12px; padding: 1rem; margin: 0.5rem 0; text-align: center;">
-                    <h4 style="color: #FFFFFF; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.5rem;">
-                        {optimization_status}
-                    </h4>
-                    <p style="color: #FFFFFF; font-size: 0.8rem; margin: 0;">
-                        {optimization_message}
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # Sugestões de otimização
-    st.markdown("#### 🚀 Sugestões de Otimização")
-    
-    optimizations = []
-    
-    # Análise baseada no histórico de treinamento
-    if training_history:
-        train_acc = training_history.get('accuracy', [])
-        val_acc = training_history.get('val_accuracy', [])
-        
-        if train_acc and val_acc:
-            final_train_acc = train_acc[-1]
-            final_val_acc = val_acc[-1]
-            overfitting = final_train_acc - final_val_acc
-            
-            if overfitting > 0.05:
-                optimizations.append("Aumentar dropout de 0.2 para 0.3-0.4")
-                optimizations.append("Implementar early stopping com paciência de 10 épocas")
-            
-            if final_val_acc < 0.95:
-                optimizations.append("Considerar aumentar unidades LSTM para 128")
-                optimizations.append("Avaliar adicionar camada LSTM adicional")
-            
-            if len(train_acc) < 50:
-                optimizations.append("Aumentar número de épocas para 100-150")
-        
-        # Otimizações gerais
-        optimizations.extend([
-            "Implementar learning rate scheduling",
-            "Adicionar batch normalization",
-            "Considerar arquitetura Bidirectional LSTM",
-            "Avaliar ensemble de múltiplos modelos"
-        ])
-    
-    for i, optimization in enumerate(optimizations, 1):
-        st.markdown(f"""
-        <div class="info-box">
-            <p style="font-size: 0.8rem; margin: 0;"><strong>{i}.</strong> {optimization}</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Roadmap de melhorias
-    st.markdown("#### 🗺️ Roadmap de Melhorias")
-    
-    roadmap_phases = {
-        "Fase 1 - Otimizações Imediatas": [
-            "Implementar early stopping",
-            "Ajustar hiperparâmetros",
-            "Adicionar validação cruzada temporal"
-        ],
-        "Fase 2 - Melhorias Arquiteturais": [
-            "Bidirectional LSTM",
-            "Attention mechanism",
-            "Ensemble de modelos"
-        ],
-        "Fase 3 - Avançadas": [
-            "Transfer learning",
-            "AutoML para otimização",
-            "Deploy em produção com MLOps"
-        ]
+
+APP = FastAPI(
+    title="Predictive Maintenance LSTM API",
+    description="Backend API for predictive maintenance using an LSTM model. Optimized for Hugging Face Spaces deployments.",
+    version="1.0.0",
+)
+
+TRAINING_DATA = load_training_data()
+X_DATA, Y_DATA = load_processed_data()
+MODEL = load_model()
+
+
+@APP.get("/", response_model=dict)
+def root():
+    return {
+        "message": "Predictive Maintenance LSTM API",
+        "docs": "/docs",
+        "health": "/health",
+        "predict": "/predict",
     }
-    
-    for phase, tasks in roadmap_phases.items():
-        st.markdown(f"**{phase}:**")
-        for task in tasks:
-            st.markdown(f"• {task}")
 
-def show_recommendations(X, y, training_data, model):
-    """Recomendações finais e próximos passos"""
-    st.markdown("### 🎯 Recomendações e Próximos Passos")
-    
-    # Status atual do projeto
-    st.markdown("#### 📊 Status Atual do Projeto")
-    
-    if training_data:
-        test_accuracy = training_data.get('final_evaluation', {}).get('test_accuracy', 0)
-        
-        if test_accuracy >= 0.95:
-            status = "✅ Pronto para Produção"
-            status_color = "#00D4AA"
-            status_message = "O modelo atende aos critérios de qualidade para deploy"
-        elif test_accuracy >= 0.90:
-            status = "⚠️ Próximo da Produção"
-            status_color = "#FFB347"
-            status_message = "Pequenos ajustes necessários antes do deploy"
-        else:
-            status = "🔧 Necessita Melhorias"
-            status_color = "#FF6B6B"
-            status_message = "Modelo precisa de otimizações significativas"
-        
-        st.markdown(f"""
-        <div style="background: {status_color}; border-radius: 12px; padding: 1.5rem; margin: 1rem 0; text-align: center;">
-            <h3 style="color: #FFFFFF; font-family: 'Inter', sans-serif; font-weight: 700; margin-bottom: 0.5rem;">
-                {status}
-            </h3>
-            <p style="color: #FFFFFF; font-size: 1rem; margin: 0;">
-                {status_message}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Recomendações específicas
-    st.markdown("#### 🚀 Recomendações Específicas")
-    
-    recommendations = [
-        "Implementar monitoramento contínuo da performance do modelo em produção",
-        "Configurar alertas automáticos para falhas preditas com alta confiança",
-        "Estabelecer pipeline de retreinamento automático com novos dados",
-        "Desenvolver dashboard de métricas em tempo real para operadores",
-        "Criar sistema de feedback para validar predições e melhorar o modelo",
-        "Implementar versionamento de modelos para rollback em caso de problemas"
-    ]
-    
-    for i, recommendation in enumerate(recommendations, 1):
-        st.markdown(f"""
-        <div class="info-box">
-            <p style="font-size: 0.8rem; margin: 0;"><strong>{i}.</strong> {recommendation}</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Próximos passos
-    st.markdown("#### 📋 Próximos Passos Recomendados")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class="data-card">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem;">🔧 Desenvolvimento</h3>
-            <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                <li>Implementar API REST para predições</li>
-                <li>Criar interface web para operadores</li>
-                <li>Desenvolver sistema de alertas</li>
-                <li>Configurar logging e monitoramento</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class="data-card">
-            <h3 style="color: #00D4AA; font-family: 'Inter', sans-serif; font-weight: 600; margin-bottom: 0.6rem;">📈 Produção</h3>
-            <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-                <li>Deploy em ambiente de produção</li>
-                <li>Integração com sistemas existentes</li>
-                <li>Treinamento da equipe operacional</li>
-                <li>Monitoramento de performance</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # ROI esperado
-    st.markdown("#### 💰 ROI Esperado")
-    
-    st.markdown("""
-    <div class="success-box">
-        <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">📊 Benefícios Esperados</h4>
-        <ul style="color: #FAFAFA; line-height: 1.6; margin: 0; font-size: 0.85rem;">
-            <li><strong>Redução de Falhas:</strong> 60-80% de redução em falhas não planejadas</li>
-            <li><strong>Economia de Custos:</strong> 30-50% de redução em custos de manutenção</li>
-            <li><strong>Disponibilidade:</strong> 15-25% de aumento na disponibilidade dos equipamentos</li>
-            <li><strong>Eficiência:</strong> 20-30% de melhoria na eficiência operacional</li>
-            <li><strong>ROI:</strong> Retorno do investimento em 6-12 meses</li>
-        </ul>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Conclusão
-    st.markdown("### 🎉 Conclusão")
-    
-    st.markdown("""
-    <div class="info-box">
-        <h4 style="color: #00D4AA; margin-bottom: 0.5rem;">🏆 Sistema de Manutenção Preditiva LSTM</h4>
-        <p style="font-size: 0.85rem; line-height: 1.6; margin: 0;">
-            Este sistema representa uma solução avançada de manutenção preditiva que combina 
-            <strong>Deep Learning</strong> com <strong>análise de séries temporais</strong> para prever falhas 
-            em máquinas industriais. Com uma acurácia de <strong>95.18%</strong>, o modelo LSTM 
-            demonstra excelente capacidade de detecção de padrões complexos em dados de sensores, 
-            oferecendo uma base sólida para implementação em ambientes industriais reais.
-        </p>
-        <p style="font-size: 0.8rem; line-height: 1.6; margin: 0.5rem 0 0 0; color: #B0B0B0;">
-            <strong>🚀 Próximo nível:</strong> O sistema está pronto para evolução contínua com 
-            novos dados, otimizações de hiperparâmetros e implementação de funcionalidades avançadas 
-            como ensemble de modelos e attention mechanisms.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    main()
+@APP.get("/health", response_model=StatusResponse)
+def health():
+    return StatusResponse(
+        model_loaded=MODEL is not None,
+        data_loaded=X_DATA is not None and Y_DATA is not None,
+        training_loaded=TRAINING_DATA is not None,
+        tensorflow_available=TF_AVAILABLE,
+    )
+
+
+@APP.get("/metadata", response_model=MetadataResponse)
+def metadata():
+    dataset_info = TRAINING_DATA.get("dataset_info", {})
+    training_info = TRAINING_DATA.get("training_parameters", {})
+    final_eval = TRAINING_DATA.get("final_evaluation", {})
+
+    return MetadataResponse(
+        project="Predictive Maintenance LSTM API",
+        description="REST API serving an LSTM model trained to detect potential machine failures.",
+        version="1.0.0",
+        features=FEATURE_NAMES,
+        sequence_length=SEQUENCE_LENGTH,
+        dataset={
+            "samples": int(X_DATA.shape[0]) if X_DATA is not None else None,
+            "failure_rate": float(Y_DATA.mean()) if Y_DATA is not None else None,
+            "source": "Local files or GitHub artifacts",
+        },
+        training={
+            "parameters": training_info,
+            "evaluation": final_eval,
+            "architecture": TRAINING_DATA.get("model_architecture", "Unknown"),
+        },
+    )
+
+
+@APP.get("/sample", response_model=dict)
+def sample():
+    if X_DATA is None or Y_DATA is None:
+        raise HTTPException(status_code=500, detail="Dataset unavailable.")
+
+    idx = int(np.random.randint(0, len(X_DATA)))
+    sample_features = X_DATA[idx].astype("float32").tolist()
+    sample_label = int(Y_DATA[idx])
+
+    probability = run_inference(np.tile(sample_features, (SEQUENCE_LENGTH, 1)))
+
+    return {
+        "index": idx,
+        "features": dict(zip(FEATURE_NAMES, sample_features)),
+        "label": sample_label,
+        "predicted_probability": probability,
+    }
+
+
+@APP.post("/predict", response_model=PredictionResponse)
+def predict(payload: PredictionRequest):
+    sequence = ensure_sequence(payload)
+    probability = run_inference(sequence)
+    label = int(probability >= 0.5)
+
+    details = {
+        "sequence_steps": int(sequence.shape[0]),
+        "features_order": FEATURE_NAMES,
+        "uses_simulated_model": isinstance(MODEL, SimulatedModel),
+    }
+
+    if payload.reading:
+        details["reading"] = payload.reading.dict()
+
+    return PredictionResponse(probability=probability, predicted_label=label, details=details)
+
+
+app = APP
+
