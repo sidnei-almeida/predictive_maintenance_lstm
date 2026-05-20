@@ -1,55 +1,72 @@
+<p align="center">
+  <img src="./images/header.png" alt="Axiom Sentinel — predictive maintenance LSTM diagnostics banner" width="920" />
+</p>
+
+<p align="center">
+  <strong>FastAPI · TensorFlow (LSTM) · NumPy · Uvicorn</strong><br />
+  <em>REST API for binary failure-risk scoring from multivariate sensor sequences — built for Docker / Hugging Face Spaces and custom frontends.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sidnei-almeida/predictive_maintenance_lstm"><strong>github.com/sidnei-almeida/predictive_maintenance_lstm</strong></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/TensorFlow-LSTM-FF6F00?logo=tensorflow&logoColor=white" alt="TensorFlow" />
+  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License MIT" />
+</p>
+
 ---
-title: Predictive Maintenance LSTM API
-emoji: 🔧
-colorFrom: teal
-colorTo: indigo
-sdk: docker
-license: mit
-pinned: false
+
+## Why this project
+
+Industrial teams need **early warning** before equipment fails. This service implements a **sequence model** perspective: an **LSTM** reads **50 consecutive timesteps** of engineered sensor features and outputs a **failure probability** in **[0, 1]** (binary risk). A **FastAPI** layer exposes that model to browsers, dashboards, or other backends over HTTP — CPU-oriented defaults keep hosting simple.
+
 ---
 
-# Predictive Maintenance LSTM API
+## Dashboard & operator experience
 
-Production-ready REST API for predictive maintenance, backed by a Long Short-Term Memory (LSTM) neural network.  
-The service is optimized for deployment on [Hugging Face Spaces](https://huggingface.co/spaces) as a Docker Space, and it exposes endpoints that your custom HTML/CSS/JS frontend can consume.
+The UI concept below (**live simulation**, **sensor console**, **thresholded risk**, latency and verdict cards) maps cleanly onto the API: sliders and “run inference” actions translate to **`POST /predict`**, while health/metadata feeds power status chips.
 
-## Features
+<p align="center">
+  <img src="./images/software.png" alt="Axiom Sentinel dashboard — simulation, sensor console, inference verdict" width="900" />
+</p>
 
-- 🚀 **Ready for Spaces**: Dockerfile and metadata prepared for instant deployment.  
-- 🤖 **LSTM backend**: Uses the pre-trained `predictive_maintenance_model.keras` model (with graceful fallbacks).  
-- 📈 **Rich metadata**: Access training stats, dataset details, and ready-to-consume health endpoints.  
-- 🧠 **Fallback heuristics**: When TensorFlow is unavailable, the API switches to a simulated heuristic predictor so the Space remains interactive.  
-- 📦 **Self-contained artifacts**: Loads local assets first and automatically falls back to the GitHub versions if needed.
+<p align="center">
+  <sub>Example frontend layout: streaming risk curve, manual sensor inputs, and real-time LSTM verdict.</sub>
+</p>
 
-## Project Structure
+*(Any frontend can integrate — the repository ships the **API** and model assets.)*
 
-```
-manutencao_preditiva_lstm/
-├── app.py                      # FastAPI application (entry point for Spaces)
-├── Dockerfile                  # Space Docker configuration
-├── requirements.txt            # Python dependencies
-├── dados/                      # Processed dataset (features/labels)
-├── modelos/                    # Pre-trained Keras model
-├── notebooks/                  # Data exploration and training notebooks
-├── treinamento/                # Training summary and metrics
-└── ...
-```
+---
 
-## API Overview
+## How inference works (summary)
 
-| Method | Endpoint    | Description                                  |
-|--------|-------------|----------------------------------------------|
-| GET    | `/`         | Basic welcome payload with helpful links     |
-| GET    | `/health`   | Component status (model/data/training)       |
-| GET    | `/metadata` | Dataset, training, and model descriptors     |
-| GET    | `/sample`   | Serves a random dataset sample + prediction  |
-| POST   | `/predict`  | Run inference using manual or sequence data  |
+1. **Features per timestep (7):** `air_temperature_k`, `process_temperature_k`, `rotational_speed_rpm`, `torque_nm`, `tool_wear_min`, plus one-hot style flags **`type_l`** and **`type_m`** for product line **L / M** (type **H** leaves both flags at `0`).
+2. **Sequence length:** **50** steps. Shorter inputs are **padded** with the last row; longer inputs keep the **most recent** 50 rows.
+3. **Output:** sigmoid **probability**; **`predicted_label`** is `1` if probability ≥ **0.5** (configurable threshold in response metadata today fixed at 0.5 in `PredictionResponse`).
+4. **Resilience:** If **TensorFlow** cannot load, a **`SimulatedModel`** heuristic answers requests so deployments stay demo-friendly (`details.uses_simulated_model` tells you which path ran).
 
-### Prediction Payloads
+Artifacts load from **`modelos/`** and **`dados/`** when present; otherwise the app **downloads** `.keras` / `.npy` / `training_summary.json` from the configured GitHub **raw** base URL inside `app.py` (sibling repo name may differ — check `REMOTE_BASE_URL` before forking).
 
-You can either send a single reading (the API broadcasts it to a 50-step sequence) or a full preprocessed sequence.
+---
 
-#### Single Reading
+## API reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Short JSON with links to docs and core routes. |
+| GET | `/health` | Model / data / training JSON availability + TensorFlow flag. |
+| GET | `/metadata` | Project string, `features`, `sequence_length`, dataset & training summaries. |
+| GET | `/sample` | Random row from processed arrays, tiled to a sequence, with a prediction. |
+| POST | `/predict` | Body with either a **single reading** or a full **preprocessed sequence**. |
+
+Interactive OpenAPI: **`/docs`** · **ReDoc:** `/redoc`
+
+### `POST /predict` — single sensor snapshot
+
+The API **tiles** one reading across 50 steps (valid for “what-if” and demos):
 
 ```json
 {
@@ -64,7 +81,11 @@ You can either send a single reading (the API broadcasts it to a 50-step sequenc
 }
 ```
 
-#### Preprocessed Sequence
+`product_type` ∈ `H` | `L` | `M`.
+
+### `POST /predict` — explicit sequence
+
+Send **`[timesteps, 7]`** floats (already scaled the same way as training). Padding / trimming rules above apply.
 
 ```json
 {
@@ -75,9 +96,7 @@ You can either send a single reading (the API broadcasts it to a 50-step sequenc
 }
 ```
 
-If the sequence contains fewer than 50 timesteps, the API pads it using the last frame; if it is longer, the most recent 50 timesteps are used.
-
-### Response Example
+### Example response (shape)
 
 ```json
 {
@@ -95,78 +114,76 @@ If the sequence contains fewer than 50 timesteps, the API pads it using the last
       "type_l",
       "type_m"
     ],
-    "uses_simulated_model": false,
-    "reading": {
-      "air_temperature_k": 298.0,
-      "process_temperature_k": 310.0,
-      "rotational_speed_rpm": 1500.0,
-      "torque_nm": 45.0,
-      "tool_wear_min": 120.0,
-      "product_type": "L"
-    }
+    "uses_simulated_model": false
   }
 }
 ```
 
-## Running Locally
+---
+
+## Run locally
 
 ```bash
-git clone https://github.com/sidnei-almeida/manutencao_preditiva_lstm.git
-cd manutencao_preditiva_lstm
-python -m venv .venv && source .venv/bin/activate
+git clone https://github.com/sidnei-almeida/predictive_maintenance_lstm.git
+cd predictive_maintenance_lstm
+
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
 pip install --no-cache-dir -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 7860 --reload
 ```
 
-The interactive docs will be available at `http://localhost:7860/docs`.
+Browse **`http://127.0.0.1:7860/docs`**.
 
-## Deploying to Hugging Face Spaces
+> **TensorFlow CPU** is the default (`tensorflow-cpu` in requirements). GPU is explicitly disabled in `app.py` for predictable cloud builds.
 
-1. Create a **Docker Space**.  
-2. Push this repository to the Space (or connect it as a Git submodule).  
-3. Spaces automatically detects the `Dockerfile`, installs dependencies, and launches `uvicorn app:app` on port 7860.
+---
 
-### Large File Storage (LFS)
+## Docker & Hugging Face Spaces
 
-Model and dataset artifacts are tracked with Git LFS via the `.gitattributes` file.  
-Before committing locally, ensure LFS is installed and pull the tracked binaries:
+- **`Dockerfile`** targets container deployment; Spaces typically run **`uvicorn app:app`** on the platform port.
+- **Large artifacts** (`.keras`, `.npy`) may use **Git LFS** — install Git LFS and run **`git lfs pull`** after clone.
+- **`packages.txt`** (when present) can carry OS libraries TensorFlow expects on Debian/Ubuntu images.
 
-```bash
-git lfs install
-git lfs pull
-```
+---
 
-When pushing to the Space, Hugging Face will store these large files efficiently ([Spaces guide](https://huggingface.co/spaces/salmeida/predictive-maintenance-lstm/)).
+## Repository layout
 
-### Environment Notes
+| Path | Role |
+|------|------|
+| `app.py` | FastAPI app, loaders, `SimulatedModel`, inference. |
+| `modelos/predictive_maintenance_model.keras` | Trained LSTM (when committed / LFS). |
+| `dados/X_processed.npy`, `dados/y_processed.npy` | Processed tensors for `/sample` & stats. |
+| `treinamento/training_summary.json` | Metrics / hyperparameters surfaced in `/metadata`. |
+| `notebooks/` | Exploration & training notebooks (if present). |
+| `Dockerfile`, `requirements.txt` | Runtime image & Python deps. |
+| `images/header.png` | README hero graphic. |
+| `images/software.png` | README dashboard preview. |
 
-- The image defaults to CPU execution (`tensorflow-cpu`); GPU layers are disabled in code.  
-- If TensorFlow cannot load, a heuristic model keeps the API responsive (flagged in responses via `uses_simulated_model`).  
-- `packages.txt` provides runtime libraries required by TensorFlow (GL, OpenMP).
+---
 
-## Frontend Integration
+## Frontend integration checklist
 
-You can build any UI stack (HTML/CSS/JS, React, etc.) and call the API from the same Space or from an external frontend. Suggested flow:
+1. **`GET /metadata`** once — populate about-screens and feature order.  
+2. **`GET /health`** — show model/data readiness and whether TensorFlow is live.  
+3. **`POST /predict`** — bind sliders / forms to `reading` or send your own `sequence` buffer.  
+4. **`GET /sample`** — quick QA or demo mode.
 
-1. Fetch `/metadata` once to display project information.  
-2. Use `/health` for heartbeat monitoring.  
-3. Invoke `/predict` with the user inputs (form fields, sliders, etc.).  
-4. Optionally show `/sample` responses for demo or QA purposes.
+---
 
-## Model Artifacts
+## Safety & disclaimer
 
-- `modelos/predictive_maintenance_model.keras`: Pre-trained binary classifier (LSTM).  
-- `treinamento/training_summary.json`: document with accuracy, loss, dataset splits, and hyperparameters.  
-- `dados/X_processed.npy`, `dados/y_processed.npy`: Processed features/labels aligned with the model input shape.
+Predictions are **experimental** and depend on training distribution, sensor quality, and preprocessing parity. **Do not** use this as the sole signal for safety-critical or legally regulated maintenance decisions. Always follow vendor procedures and local regulations.
 
-## Development Roadmap
-
-- Add streaming predictions for near-real-time sensors.  
-- Provide calibration and explainability endpoints (feature attributions, SHAP summaries).  
-- Ship an end-to-end demo Space with the planned custom frontend.  
-- Automate re-training using the notebooks and CI/CD triggers.
+---
 
 ## License
 
-Released under the [MIT License](LICENSE).  
-Created by [Sidnei Almeida](https://github.com/sidnei-almeida). Pull requests and community contributions are welcome!
+MIT License — include a `LICENSE` file in the repository when distributing.
+
+---
+
+## Author
+
+**Sidnei Almeida** — [github.com/sidnei-almeida](https://github.com/sidnei-almeida) · contributions welcome.
