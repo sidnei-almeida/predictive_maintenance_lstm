@@ -40,6 +40,20 @@ FEATURE_NAMES = [
 ]
 SEQUENCE_LENGTH = 50
 REMOTE_BASE_URL = "https://raw.githubusercontent.com/sidnei-almeida/manutencao_preditiva_lstm/main"
+DEFAULT_DECISION_THRESHOLD = 0.6
+
+
+def load_decision_threshold() -> float:
+    for path in ("metricas/dashboard_metrics.json", "modelos/dashboard_metrics.json"):
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as metrics_file:
+                    threshold = json.load(metrics_file).get("decision_threshold")
+                    if threshold is not None:
+                        return float(threshold)
+        except Exception as exc:
+            logger.warning("Could not load decision threshold from %s: %s", path, exc)
+    return DEFAULT_DECISION_THRESHOLD
 
 
 class ManualReading(BaseModel):
@@ -70,7 +84,7 @@ class PredictionRequest(BaseModel):
 class PredictionResponse(BaseModel):
     probability: float
     predicted_label: int
-    threshold: float = 0.5
+    threshold: float = DEFAULT_DECISION_THRESHOLD
     details: dict
 
 
@@ -298,6 +312,7 @@ APP = FastAPI(
 TRAINING_DATA = load_training_data()
 X_DATA, Y_DATA = load_processed_data()
 MODEL = load_model()
+DECISION_THRESHOLD = load_decision_threshold()
 
 
 @APP.get("/", response_model=dict)
@@ -368,7 +383,7 @@ def sample():
 def predict(payload: PredictionRequest):
     sequence = ensure_sequence(payload)
     probability = run_inference(sequence)
-    label = int(probability >= 0.5)
+    label = int(probability >= DECISION_THRESHOLD)
 
     details = {
         "sequence_steps": int(sequence.shape[0]),
@@ -379,7 +394,12 @@ def predict(payload: PredictionRequest):
     if payload.reading:
         details["reading"] = payload.reading.dict()
 
-    return PredictionResponse(probability=probability, predicted_label=label, details=details)
+    return PredictionResponse(
+        probability=probability,
+        predicted_label=label,
+        threshold=DECISION_THRESHOLD,
+        details=details,
+    )
 
 
 app = APP

@@ -1,0 +1,33 @@
+{
+    "primary_metric": "failure_recall",
+    "decision_threshold": 0.6,
+    "failure_recall": 0.7647058823529411,
+    "alert_precision": 0.26666666666666666,
+    "f1_score": 0.39543726235741444,
+    "accuracy": 0.9201406328478152,
+    "roc_auc": 0.9526781071242849,
+    "pr_auc": 0.4989368872668242,
+    "test_loss": 0.24352669715881348,
+    "confusion_matrix": [
+        [
+            1780,
+            143
+        ],
+        [
+            16,
+            52
+        ]
+    ],
+    "dataset_context": {
+        "failure_rate": 0.0341,
+        "normal_rate": 0.9659,
+        "note": "Failure cases represent only about 3.4% of the dataset, so accuracy is treated as a secondary metric."
+    },
+    "metric_interpretation": {
+        "failure_recall": "Percentage of real failures detected by the model.",
+        "alert_precision": "Percentage of predicted alerts that were actual failures.",
+        "f1_score": "Balance between recall and precision.",
+        "roc_auc": "Overall ranking/separation quality between normal and failure cases.",
+        "pr_auc": "Precision-recall performance, especially relevant for imbalanced datasets."
+    }
+}

@@ -45,7 +45,7 @@ The UI concept below (**live simulation**, **sensor console**, **thresholded ris
 
 1. **Features per timestep (7):** `air_temperature_k`, `process_temperature_k`, `rotational_speed_rpm`, `torque_nm`, `tool_wear_min`, plus one-hot style flags **`type_l`** and **`type_m`** for product line **L / M** (type **H** leaves both flags at `0`).
 2. **Sequence length:** **50** steps. Shorter inputs are **padded** with the last row; longer inputs keep the **most recent** 50 rows.
-3. **Output:** sigmoid **probability**; **`predicted_label`** is `1` if probability ≥ **0.5** (configurable threshold in response metadata today fixed at 0.5 in `PredictionResponse`).
+3. **Output:** sigmoid **probability**; **`predicted_label`** is `1` if probability ≥ **0.6** (loaded from `metricas/dashboard_metrics.json` when present; default **0.6**).
 4. **Resilience:** If **TensorFlow** cannot load, a **`SimulatedModel`** heuristic answers requests so deployments stay demo-friendly (`details.uses_simulated_model` tells you which path ran).
 
 Artifacts load from **`modelos/`** and **`dados/`** when present; otherwise the app **downloads** `.keras` / `.npy` / `training_summary.json` from the configured GitHub **raw** base URL inside `app.py` (sibling repo name may differ — check `REMOTE_BASE_URL` before forking).
@@ -102,7 +102,7 @@ Send **`[timesteps, 7]`** floats (already scaled the same way as training). Padd
 {
   "probability": 0.7421,
   "predicted_label": 1,
-  "threshold": 0.5,
+  "threshold": 0.6,
   "details": {
     "sequence_steps": 50,
     "features_order": [
@@ -143,7 +143,7 @@ Browse **`http://127.0.0.1:7860/docs`**.
 ## Docker & Hugging Face Spaces
 
 - **`Dockerfile`** targets container deployment; Spaces typically run **`uvicorn app:app`** on the platform port.
-- **Large artifacts** (`.keras`, `.npy`) may use **Git LFS** — install Git LFS and run **`git lfs pull`** after clone.
+- **Processed datasets** (`.npy`) use **Git LFS** — install Git LFS and run **`git lfs pull`** after clone. The `.keras` model is stored directly in Git.
 - **`packages.txt`** (when present) can carry OS libraries TensorFlow expects on Debian/Ubuntu images.
 
 ---
@@ -153,7 +153,7 @@ Browse **`http://127.0.0.1:7860/docs`**.
 | Path | Role |
 |------|------|
 | `app.py` | FastAPI app, loaders, `SimulatedModel`, inference. |
-| `modelos/predictive_maintenance_model.keras` | Trained LSTM (when committed / LFS). |
+| `modelos/predictive_maintenance_model.keras` | Trained LSTM (~250 KB, versioned in Git). |
 | `dados/X_processed.npy`, `dados/y_processed.npy` | Processed tensors for `/sample` & stats. |
 | `treinamento/training_summary.json` | Metrics / hyperparameters surfaced in `/metadata`. |
 | `notebooks/` | Exploration & training notebooks (if present). |
